@@ -32,6 +32,8 @@ export interface QoderInnerChunk {
     prompt_tokens?: number
     completion_tokens?: number
     total_tokens?: number
+    prompt_tokens_details?: { cached_tokens?: number }
+    completion_tokens_details?: { reasoning_tokens?: number }
   }
 }
 
@@ -65,13 +67,25 @@ export function mapFinishReason(reason: string): FinishReason {
 
 /**
  * Map inner usage fields to disjoint harness counts.
+ *
+ * The gateway's `prompt_tokens` is the whole prompt, cache hits included, while
+ * {@link TokenUsage} counts are disjoint: `inputTokens` is uncached input only
+ * and cached input is reported separately. Cache hits are therefore subtracted
+ * out of the prompt total rather than counted twice.
  * @param usage - the inner chunk's usage object.
- * @returns the disjoint prompt/output counts (zero-filled).
+ * @returns the disjoint prompt/output counts, plus cache and reasoning detail.
  */
 export function mapUsage(usage: NonNullable<QoderInnerChunk['usage']>): TokenUsage {
+  const promptTokens = usage.prompt_tokens ?? 0
+  const cacheReadTokens = usage.prompt_tokens_details?.cached_tokens ?? 0
+  const completionTokens = usage.completion_tokens ?? 0
+  const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens
   return {
-    inputTokens: usage.prompt_tokens ?? 0,
-    outputTokens: usage.completion_tokens ?? 0,
+    inputTokens: Math.max(0, promptTokens - cacheReadTokens),
+    outputTokens: completionTokens,
+    ...usage.total_tokens === undefined ? {} : { totalTokens: usage.total_tokens },
+    ...cacheReadTokens > 0 ? { cacheReadTokens } : {},
+    ...reasoningTokens === undefined || reasoningTokens === 0 ? {} : { reasoningTokens },
   }
 }
 

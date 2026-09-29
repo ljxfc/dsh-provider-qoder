@@ -10,7 +10,7 @@
  * @module dsh-provider-qoder
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { assertUsableApiKey, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
@@ -38,6 +38,10 @@ export {
 } from './adapter.ts'
 export type { QoderAdapterOptions, QoderCatalogModel, QoderConnectionOptions } from './adapter.ts'
 export { qoderEncodeBody } from './qoder-encoding.ts'
+export { serializeMessages, serializeRequest, systemTextOf } from './serialize.ts'
+export type { QoderMessage, QoderSerializedRequest } from './serialize.ts'
+export { mapFinishReason, mapUsage } from './translate.ts'
+export { parseQoderSse, parseEnvelope, DONE } from './sse.ts'
 export { buildQoderAuthHeaders, qoderCnEndpoints, getQoderCNDirectModel } from './cosy.ts'
 export { exchangeJobToken, refreshJobToken, fetchUserInfo } from './pat.ts'
 
@@ -50,13 +54,11 @@ const DEFAULT_API_KEY_ENV = 'QODERCN_PERSONAL_ACCESS_TOKEN'
 const PROVIDER = 'qoder-cn'
 
 /**
- * Plugin config, validated by the same-named schemastery schema and doubling
- * as the `llm-qoder` settings-section shape. Every field is optional in yml:
- * a missing PAT resolves through {@link Config.apiKeyEnv} at each request (a
- * request without any key fails with `MISSING_CREDENTIAL`, not at plugin
- * load), and omitted endpoint facts use the public CN cloud.
+ * One stored provider profile. The profile fields stay plain because the
+ * parent `providers` dictionary is the volatile settings boundary in the
+ * dsh-v0.1.7 contract.
  */
-export interface Config {
+export interface QoderProviderProfile {
   /** Credential reference resolved per request; defaults to `QODERCN_PERSONAL_ACCESS_TOKEN`. */
   apiKeyEnv?: string
   /** Enterprise VPC tenant instance (`<instance>.vpc.qoder.com.cn`); absent selects the public cloud. */
@@ -75,8 +77,30 @@ export interface Config {
   streamIdleTimeoutMs?: number
   /** Provider-owned model-request retry policy; omission uses normal defaults. */
   retryPolicy?: RetryPolicyConfig
+}
+
+/**
+ * Resolved plugin configuration in dsh-v0.1.7: editable fields are volatile
+ * references, so the running plugin can observe Models-page writes without a
+ * remount. The plain values are read through {@link plainConfig} below.
+ */
+export interface Config {
+  apiKeyEnv: Volatile<string>
+  vpcInstance: Volatile<string | undefined>
+  baseURL: Volatile<string | undefined>
+  openApiUrl: Volatile<string | undefined>
+  maxTokens: Volatile<number>
+  defaultContextWindow: Volatile<number>
+  models: Volatile<QoderCatalogModel[] | undefined>
+  streamIdleTimeoutMs: Volatile<number>
+  retryPolicy: Volatile<RetryPolicyConfig | undefined>
   /** User-added `qoder-cn` profile; absence keeps the route in Add provider. */
-  providers?: Record<string, Omit<Config, 'providers'>>
+  providers: Volatile<Record<string, QoderProviderProfile>>
+}
+
+/** Plain form accepted by the resolver and by tests outside a Loader runtime. */
+export interface QoderConfigValues extends QoderProviderProfile {
+  providers?: Record<string, QoderProviderProfile>
 }
 
 const catalogModel: z<QoderCatalogModel> = z.object({
@@ -102,17 +126,24 @@ const connectionFields = {
   retryPolicy: RetryPolicySchema,
 }
 
+/** Root fields are individually editable in the generic settings form. */
+const volatileConnectionFields = {
+  apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV).volatile(),
+  vpcInstance: z.string().volatile(),
+  baseURL: z.string().volatile(),
+  openApiUrl: z.string().volatile(),
+  maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_TOKENS).volatile(),
+  defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW).volatile(),
+  // Keep an omitted catalog distinguishable from an empty catalog so live
+  // discovery remains the default.
+  models: z.array(catalogModel).default(undefined as never).volatile(),
+  streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS).volatile(),
+  retryPolicy: RetryPolicySchema.volatile(),
+}
+
 export const Config: z<Config> = z.object({
-  apiKeyEnv: connectionFields.apiKeyEnv,
-  vpcInstance: connectionFields.vpcInstance,
-  baseURL: connectionFields.baseURL,
-  openApiUrl: connectionFields.openApiUrl,
-  maxTokens: connectionFields.maxTokens,
-  defaultContextWindow: connectionFields.defaultContextWindow,
-  models: connectionFields.models,
-  streamIdleTimeoutMs: connectionFields.streamIdleTimeoutMs,
-  retryPolicy: connectionFields.retryPolicy,
-  providers: z.dict(z.object(connectionFields)),
+  ...volatileConnectionFields,
+  providers: z.dict(z.object(connectionFields)).default({}).volatile(),
 })
 
 /** Public gateway origin; used when no override and no VPC instance are configured. */
@@ -158,6 +189,31 @@ function resolveModels(
 /** One resolution's complete request facts. */
 export type ResolvedQoderOptions = QoderConnectionOptions
 
+/** Read either a Loader-owned volatile reference or a plain test value. */
+function readConfigValue<T>(value: T | Volatile<T> | undefined): T | undefined {
+  if (value !== null && typeof value === 'object') {
+    const candidate = value as { get?: unknown }
+    if (typeof candidate.get === 'function') return (candidate.get as () => T)()
+  }
+  return value as T | undefined
+}
+
+/** Detach one immutable plain snapshot from the live Config references. */
+function plainConfig(config: Config | QoderConfigValues): QoderConfigValues {
+  return {
+    apiKeyEnv: readConfigValue(config.apiKeyEnv),
+    vpcInstance: readConfigValue(config.vpcInstance),
+    baseURL: readConfigValue(config.baseURL),
+    openApiUrl: readConfigValue(config.openApiUrl),
+    maxTokens: readConfigValue(config.maxTokens),
+    defaultContextWindow: readConfigValue(config.defaultContextWindow),
+    models: readConfigValue(config.models),
+    streamIdleTimeoutMs: readConfigValue(config.streamIdleTimeoutMs),
+    retryPolicy: readConfigValue(config.retryPolicy),
+    providers: readConfigValue(config.providers),
+  }
+}
+
 /**
  * The one explicit resolve step from raw config to validated connection
  * facts. Endpoint overrides and the VPC instance resolve from configuration
@@ -167,20 +223,24 @@ export type ResolvedQoderOptions = QoderConnectionOptions
  *   the product CLI.
  * @returns validated connection facts plus the credential reference.
  */
-export function resolveAdapterOptions(config: Config, environment?: LaunchEnvironmentSnapshot): ResolvedQoderOptions {
-  const profile = config.providers?.[PROVIDER]
+export function resolveAdapterOptions(
+  config: Config | QoderConfigValues,
+  environment?: LaunchEnvironmentSnapshot,
+): ResolvedQoderOptions {
+  let values = plainConfig(config)
+  const profile = values.providers?.[PROVIDER]
   if (profile !== undefined) {
-    config = { ...config, ...profile }
+    values = { ...values, ...profile }
   }
-  if (config.defaultContextWindow !== undefined
-    && (!Number.isInteger(config.defaultContextWindow) || config.defaultContextWindow <= 0)) {
+  if (values.defaultContextWindow !== undefined
+    && (!Number.isInteger(values.defaultContextWindow) || values.defaultContextWindow <= 0)) {
     throw new Error('llm-qoder: defaultContextWindow must be a positive integer')
   }
-  if (config.maxTokens !== undefined
-    && (!Number.isSafeInteger(config.maxTokens) || config.maxTokens <= 0)) {
+  if (values.maxTokens !== undefined
+    && (!Number.isSafeInteger(values.maxTokens) || values.maxTokens <= 0)) {
     throw new Error('llm-qoder: maxTokens must be a positive safe integer')
   }
-  const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
+  const streamIdleTimeoutMs = values.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
   if (!Number.isFinite(streamIdleTimeoutMs)
     || streamIdleTimeoutMs <= 0
     || streamIdleTimeoutMs > MAX_TIMER_DELAY_MS) {
@@ -190,34 +250,33 @@ export function resolveAdapterOptions(config: Config, environment?: LaunchEnviro
   }
 
   const get = (name: string): { value: string } | undefined => environment?.get(name)
-  const vpcInstance = config.vpcInstance
+  const vpcInstance = values.vpcInstance
     ?? parseVpcInstanceFromEnvironment(get)
   const endpoints = qoderCnEndpoints(vpcInstance)
   const finalEndpoints = {
-    gateway: config.baseURL?.replace(/\/+$/, '') ?? endpoints.gateway,
-    openapi: config.openApiUrl?.replace(/\/+$/, '') ?? endpoints.openapi,
+    gateway: values.baseURL?.replace(/\/+$/, '') ?? endpoints.gateway,
+    openapi: values.openApiUrl?.replace(/\/+$/, '') ?? endpoints.openapi,
     manage: endpoints.manage,
   }
 
   return {
     endpoints: finalEndpoints,
-    apiKeyEnv: credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
-    maxTokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
-    defaultContextWindow: config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    models: resolveModels(config.models),
+    apiKeyEnv: credentialRef(values.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
+    maxTokens: values.maxTokens ?? DEFAULT_MAX_TOKENS,
+    defaultContextWindow: values.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    models: resolveModels(values.models),
     streamIdleTimeoutMs,
-    retryPolicy: resolveRetryPolicy(config.retryPolicy, 'llm-qoder: retryPolicy'),
+    retryPolicy: resolveRetryPolicy(values.retryPolicy, 'llm-qoder: retryPolicy'),
     machineId: getMachineId(dshHomePath()),
   }
 }
 
 export function apply(ctx: Context, config: Config): void {
-  let current: () => Config = () => config
-  let lastRaw: Config | undefined
+  let lastRaw: QoderConfigValues | undefined
   let lastGood: ResolvedQoderOptions | undefined
   const options = (): ResolvedQoderOptions => {
-    const raw = current()
-    if (raw === lastRaw && lastGood !== undefined) return lastGood
+    const raw = plainConfig(config)
+    if (lastGood !== undefined && lastRaw !== undefined && deepEqualJson(raw, lastRaw)) return lastGood
     try {
       const next = resolveAdapterOptions(raw, launchEnvironmentOf(ctx))
       lastRaw = raw
@@ -229,12 +288,18 @@ export function apply(ctx: Context, config: Config): void {
       // keep serving the last good facts and say so once per bad snapshot.
       if (lastGood === undefined) throw error
       lastRaw = raw
-      ctx.logger.error('llm-qoder: keeping the last good configuration after an invalid settings section')
+      ctx.logger.error('llm-qoder: keeping the last good configuration after an invalid settings update')
       ctx.logger.error(error)
       return lastGood
     }
   }
   options()
+
+  // dsh-v0.1.7 exposes Qoder's provider editor through Models. Do not also
+  // generate a generic Settings page for the same entry.
+  ctx.inject(['settings'], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+  })
 
   const resolveApiKey = async (connection: ResolvedQoderOptions): Promise<string> => {
     const ref = connection.apiKeyEnv
@@ -242,11 +307,14 @@ export function apply(ctx: Context, config: Config): void {
     if (credentials !== undefined) {
       const hit = await credentials.resolve(ref)
       if (hit !== undefined) return assertUsableApiKey(hit.value, 'llm-qoder', ref)
-    } else {
-      const ambient = launchEnvironmentOf(ctx).get(ref)
-      if (ambient !== undefined && ambient.value.length > 0) {
-        return assertUsableApiKey(ambient.value, 'llm-qoder', ref)
-      }
+    }
+    // Desktop v0.1.7 mounts the credentials service even when no Qoder
+    // credential has been stored yet. Keep the documented environment route
+    // usable in that composition instead of treating an absent credential
+    // record as a terminal miss.
+    const ambient = launchEnvironmentOf(ctx).get(ref)
+    if (ambient !== undefined && ambient.value.length > 0) {
+      return assertUsableApiKey(ambient.value, 'llm-qoder', ref)
     }
     // QODERCN_PAT is an accepted alias. QODER_API_KEY is accepted only when
     // its value is a PAT (`pt-...`), never an opaque job token or other key.
@@ -270,8 +338,9 @@ export function apply(ctx: Context, config: Config): void {
     resolveApiKey,
     resolveAttachments: () => ctx.get('attachments'),
   })
+  const settingsNs = ctx.fiber.entry?.options.id ?? NS
   ctx.llm.registerConfigurableProviders([
-    { provider: PROVIDER, displayName: PROVIDER, settingsNs: NS, settingsPath: ['providers', PROVIDER] },
+    { provider: PROVIDER, displayName: PROVIDER, settingsNs, settingsPath: ['providers', PROVIDER] },
   ])
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
   let registeredPolicy = options().retryPolicy
@@ -282,12 +351,15 @@ export function apply(ctx: Context, config: Config): void {
     registeredPolicy = policy
   }
 
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, NS, Config, config, {
-      setSource: (source) => {
-        current = source
-      },
-      onChange: ensureRegistrationFacts,
-    })
+  // Volatile settings are committed into the same Config references. The
+  // adapter reads those references on the next operation; only the registry's
+  // captured retry policy needs an explicit atomic replacement.
+  ctx.on('loader/volatile-update', () => {
+    try {
+      ensureRegistrationFacts()
+    } catch (error) {
+      ctx.logger.error('llm-qoder: keeping the last good configuration after an invalid settings update')
+      ctx.logger.error(error)
+    }
   })
 }

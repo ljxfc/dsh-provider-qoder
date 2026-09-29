@@ -69,7 +69,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 6HRkPJ7S236FZz73In/KVuLnwI8JJ2CbuJap8kvheCCZpmAWpb/cPx/3Vr/J6I17
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`;
-var QoderIDEVersion = "1.0.0";
+var QoderGatewayCosyVersion = "1.1.38";
 var QoderClientType = "5";
 var QoderDataPolicy = "disagree";
 var QoderLoginVersion = "v2";
@@ -116,7 +116,7 @@ function qoderChatUrl(endpoints) {
   return `${endpoints.gateway}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`;
 }
 function qoderModelListUrl(endpoints) {
-  return `${endpoints.gateway}/algo/api/v2/model/list`;
+  return `${endpoints.gateway}/algo/api/v2/model/list?Encode=1`;
 }
 function getQoderCNDirectModel(modelID) {
   return {
@@ -224,7 +224,7 @@ function buildQoderAuthHeaders(body, requestURL, creds) {
     version: "v1",
     requestId,
     info: infoB64,
-    cosyVersion: QoderIDEVersion,
+    cosyVersion: QoderGatewayCosyVersion,
     ideVersion: ""
   };
   const payloadB64 = Buffer.from(JSON.stringify(cosyPayload)).toString("base64");
@@ -244,7 +244,7 @@ ${sigPath}`;
     "Cosy-Key": cosyKey,
     "Cosy-User": creds.userID,
     "Cosy-Date": timestamp,
-    "Cosy-Version": QoderIDEVersion,
+    "Cosy-Version": QoderGatewayCosyVersion,
     "Cosy-Machineid": machineID,
     "Cosy-Machinetoken": machineID,
     "Cosy-Machinetype": QoderMachineTypeMagic,
@@ -306,6 +306,9 @@ async function exchangeJobToken(pat, endpoints, signal) {
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
+      // Uncompressed by request: a proxy dispatcher in front of the gateway can
+      // deliver an encoded body without its content-encoding header.
+      "Accept-Encoding": "identity",
       "User-Agent": UA,
       "Cosy-Version": "1.0.1",
       "Cosy-ClientType": "5"
@@ -336,6 +339,8 @@ async function refreshJobToken(jobRefreshToken, endpoints, signal) {
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
+      // Uncompressed by request; see the exchange request above.
+      "Accept-Encoding": "identity",
       "User-Agent": UA,
       "Cosy-Version": "1.0.1",
       "Cosy-ClientType": "5"
@@ -366,6 +371,7 @@ async function fetchUserInfo(jobToken, endpoints, signal) {
       headers: {
         Authorization: `Bearer ${jobToken}`,
         Accept: "application/json",
+        "Accept-Encoding": "identity",
         "User-Agent": UA,
         "Cosy-Version": "1.0.1",
         "Cosy-ClientType": "5"
@@ -430,36 +436,41 @@ async function userContent(blocks, attachments) {
         });
         break;
       }
-      case "tool-result": {
-        const nested = await userContent(block.content, attachments);
-        if (typeof nested !== "string") content.push(...nested);
-        else content.push({ type: "text", text: nested });
-        break;
-      }
       default:
         break;
     }
   }
   return content;
 }
+function systemTextOf(options) {
+  const parts = [];
+  if (options.system !== void 0 && options.system.length > 0) {
+    parts.push(options.system);
+  }
+  for (const msg of options.messages) {
+    if (msg.role !== "system") continue;
+    const text = getBlocksText(msg.content);
+    if (text.length > 0) parts.push(text);
+  }
+  return parts.join("\n\n");
+}
 async function serializeMessages(options, attachments) {
   const normalizedMessages = [];
   for (const msg of options.messages) {
+    if (msg.role === "system" || msg.role === "developer") {
+      continue;
+    }
+    if (msg.role === "tool") {
+      const content = await userContent(msg.content, attachments);
+      normalizedMessages.push({
+        role: "tool",
+        tool_call_id: String(msg.toolCallId),
+        content: typeof content === "string" ? content || "(no output)" : content
+      });
+      continue;
+    }
     if (msg.role === "user") {
-      const regular = msg.content.filter((block) => block.type !== "tool-result");
-      const content = await userContent(regular, attachments);
-      const results = msg.content.filter((block) => block.type === "tool-result");
-      if (content !== "" || results.length === 0) {
-        normalizedMessages.push({ role: "user", content });
-      }
-      for (const result of results) {
-        const resultContent = await userContent(result.content, attachments);
-        normalizedMessages.push({
-          role: "tool",
-          tool_call_id: result.toolCallId,
-          content: typeof resultContent === "string" ? resultContent || "(no output)" : resultContent
-        });
-      }
+      normalizedMessages.push({ role: "user", content: await userContent(msg.content, attachments) });
       continue;
     }
     if (msg.role === "assistant") {
@@ -484,17 +495,21 @@ async function serializeMessages(options, attachments) {
           toolCalls.push(call);
         }
       }
-      const mapped = { role: "assistant", content: content || null };
+      const mapped = { role: "assistant", content };
       if (toolCalls.length > 0) {
         mapped.tool_calls = toolCalls;
       }
       normalizedMessages.push(mapped);
       continue;
     }
-    const text = getBlocksText(msg.content);
-    if (text.length > 0) normalizedMessages.push({ role: "user", content: text });
   }
   return normalizedMessages;
+}
+async function serializeRequest(options, attachments) {
+  return {
+    system: systemTextOf(options),
+    messages: await serializeMessages(options, attachments)
+  };
 }
 function lastUserText(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -615,9 +630,16 @@ function mapFinishReason(reason) {
   }
 }
 function mapUsage(usage) {
+  const promptTokens = usage.prompt_tokens ?? 0;
+  const cacheReadTokens = usage.prompt_tokens_details?.cached_tokens ?? 0;
+  const completionTokens = usage.completion_tokens ?? 0;
+  const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens;
   return {
-    inputTokens: usage.prompt_tokens ?? 0,
-    outputTokens: usage.completion_tokens ?? 0
+    inputTokens: Math.max(0, promptTokens - cacheReadTokens),
+    outputTokens: completionTokens,
+    ...usage.total_tokens === void 0 ? {} : { totalTokens: usage.total_tokens },
+    ...cacheReadTokens > 0 ? { cacheReadTokens } : {},
+    ...reasoningTokens === void 0 || reasoningTokens === 0 ? {} : { reasoningTokens }
   };
 }
 function closeBlock(block) {
@@ -926,6 +948,11 @@ var QoderAdapter = class extends LlmAdapter {
         method: "GET",
         headers: {
           Accept: "application/json",
+          // The gateway compresses by default, and DSH installs a proxy
+          // dispatcher (HTTP_PROXY) whose responses can arrive without their
+          // content-encoding header, leaving the body undecodable. The catalog
+          // is small, so ask for it uncompressed and always get JSON.
+          "Accept-Encoding": "identity",
           ...headers,
           ...attributionHeaders()
         },
@@ -947,16 +974,29 @@ var QoderAdapter = class extends LlmAdapter {
         { status: response.status }
       );
     }
-    let value;
+    let payload;
     try {
-      value = await response.json();
+      payload = await response.text();
     } catch (error) {
       if (signal?.aborted) {
         throw new LlmError4("Qoder CN model discovery aborted by caller", "ABORTED", { cause: error });
       }
-      throw new LlmError4("Qoder CN model listing did not answer with JSON", "DISCOVERY_FAILED", {
-        cause: error
-      });
+      throw new LlmError4("Qoder CN model listing could not be read", "DISCOVERY_FAILED", { cause: error });
+    }
+    let value;
+    try {
+      value = JSON.parse(payload);
+    } catch (error) {
+      if (signal?.aborted) {
+        throw new LlmError4("Qoder CN model discovery aborted by caller", "ABORTED", { cause: error });
+      }
+      const contentType = response.headers.get("content-type") ?? "none";
+      const preview = payload.slice(0, 120).replace(/[^\x20-\x7e]/g, ".");
+      throw new LlmError4(
+        `Qoder CN model listing did not answer with JSON (content-type ${contentType}, ${payload.length} bytes): ${preview}`,
+        "DISCOVERY_FAILED",
+        { cause: error }
+      );
     }
     return parseQoderModelCatalog(value);
   }
@@ -1023,7 +1063,7 @@ var QoderAdapter = class extends LlmAdapter {
     const attachments = this.config.resolveAttachments();
     const messages = await serializeMessages(options, attachments);
     const tools = transformTools(options);
-    const system = options.system ?? "";
+    const system = systemTextOf(options);
     const originalContent = lastUserText(options.messages);
     const requestId = crypto2.randomUUID();
     const sessionID = crypto2.createHash("sha256").update(`qoder-session\0${identity.userID}\0${qoderModel}`).digest("hex").slice(0, 16);
@@ -1259,17 +1299,22 @@ var connectionFields = {
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   retryPolicy: RetryPolicySchema
 };
+var volatileConnectionFields = {
+  apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV).volatile(),
+  vpcInstance: z.string().volatile(),
+  baseURL: z.string().volatile(),
+  openApiUrl: z.string().volatile(),
+  maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_TOKENS).volatile(),
+  defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW).volatile(),
+  // Keep an omitted catalog distinguishable from an empty catalog so live
+  // discovery remains the default.
+  models: z.array(catalogModel).default(void 0).volatile(),
+  streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS).volatile(),
+  retryPolicy: RetryPolicySchema.volatile()
+};
 var Config = z.object({
-  apiKeyEnv: connectionFields.apiKeyEnv,
-  vpcInstance: connectionFields.vpcInstance,
-  baseURL: connectionFields.baseURL,
-  openApiUrl: connectionFields.openApiUrl,
-  maxTokens: connectionFields.maxTokens,
-  defaultContextWindow: connectionFields.defaultContextWindow,
-  models: connectionFields.models,
-  streamIdleTimeoutMs: connectionFields.streamIdleTimeoutMs,
-  retryPolicy: connectionFields.retryPolicy,
-  providers: z.dict(z.object(connectionFields))
+  ...volatileConnectionFields,
+  providers: z.dict(z.object(connectionFields)).default({}).volatile()
 });
 var PUBLIC_GATEWAY_URL = "https://gateway.qoder.com.cn";
 function resolveModels(models) {
@@ -1303,49 +1348,70 @@ function resolveModels(models) {
     };
   });
 }
-function resolveAdapterOptions(config, environment) {
-  const profile = config.providers?.[PROVIDER];
-  if (profile !== void 0) {
-    config = { ...config, ...profile };
+function readConfigValue(value) {
+  if (value !== null && typeof value === "object") {
+    const candidate = value;
+    if (typeof candidate.get === "function") return candidate.get();
   }
-  if (config.defaultContextWindow !== void 0 && (!Number.isInteger(config.defaultContextWindow) || config.defaultContextWindow <= 0)) {
+  return value;
+}
+function plainConfig(config) {
+  return {
+    apiKeyEnv: readConfigValue(config.apiKeyEnv),
+    vpcInstance: readConfigValue(config.vpcInstance),
+    baseURL: readConfigValue(config.baseURL),
+    openApiUrl: readConfigValue(config.openApiUrl),
+    maxTokens: readConfigValue(config.maxTokens),
+    defaultContextWindow: readConfigValue(config.defaultContextWindow),
+    models: readConfigValue(config.models),
+    streamIdleTimeoutMs: readConfigValue(config.streamIdleTimeoutMs),
+    retryPolicy: readConfigValue(config.retryPolicy),
+    providers: readConfigValue(config.providers)
+  };
+}
+function resolveAdapterOptions(config, environment) {
+  let values = plainConfig(config);
+  const profile = values.providers?.[PROVIDER];
+  if (profile !== void 0) {
+    values = { ...values, ...profile };
+  }
+  if (values.defaultContextWindow !== void 0 && (!Number.isInteger(values.defaultContextWindow) || values.defaultContextWindow <= 0)) {
     throw new Error("llm-qoder: defaultContextWindow must be a positive integer");
   }
-  if (config.maxTokens !== void 0 && (!Number.isSafeInteger(config.maxTokens) || config.maxTokens <= 0)) {
+  if (values.maxTokens !== void 0 && (!Number.isSafeInteger(values.maxTokens) || values.maxTokens <= 0)) {
     throw new Error("llm-qoder: maxTokens must be a positive safe integer");
   }
-  const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  const streamIdleTimeoutMs = values.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
   if (!Number.isFinite(streamIdleTimeoutMs) || streamIdleTimeoutMs <= 0 || streamIdleTimeoutMs > MAX_TIMER_DELAY_MS) {
     throw new Error(
       `llm-qoder: streamIdleTimeoutMs must be a positive finite number no greater than ${MAX_TIMER_DELAY_MS}`
     );
   }
   const get = (name2) => environment?.get(name2);
-  const vpcInstance = config.vpcInstance ?? parseVpcInstanceFromEnvironment(get);
+  const vpcInstance = values.vpcInstance ?? parseVpcInstanceFromEnvironment(get);
   const endpoints = qoderCnEndpoints(vpcInstance);
   const finalEndpoints = {
-    gateway: config.baseURL?.replace(/\/+$/, "") ?? endpoints.gateway,
-    openapi: config.openApiUrl?.replace(/\/+$/, "") ?? endpoints.openapi,
+    gateway: values.baseURL?.replace(/\/+$/, "") ?? endpoints.gateway,
+    openapi: values.openApiUrl?.replace(/\/+$/, "") ?? endpoints.openapi,
     manage: endpoints.manage
   };
   return {
     endpoints: finalEndpoints,
-    apiKeyEnv: credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
-    maxTokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
-    defaultContextWindow: config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    models: resolveModels(config.models),
+    apiKeyEnv: credentialRef(values.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
+    maxTokens: values.maxTokens ?? DEFAULT_MAX_TOKENS,
+    defaultContextWindow: values.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    models: resolveModels(values.models),
     streamIdleTimeoutMs,
-    retryPolicy: resolveRetryPolicy(config.retryPolicy, "llm-qoder: retryPolicy"),
+    retryPolicy: resolveRetryPolicy(values.retryPolicy, "llm-qoder: retryPolicy"),
     machineId: getMachineId(dshHomePath())
   };
 }
 function apply(ctx, config) {
-  let current = () => config;
   let lastRaw;
   let lastGood;
   const options = () => {
-    const raw = current();
-    if (raw === lastRaw && lastGood !== void 0) return lastGood;
+    const raw = plainConfig(config);
+    if (lastGood !== void 0 && lastRaw !== void 0 && deepEqualJson(raw, lastRaw)) return lastGood;
     try {
       const next = resolveAdapterOptions(raw, launchEnvironmentOf(ctx));
       lastRaw = raw;
@@ -1354,23 +1420,25 @@ function apply(ctx, config) {
     } catch (error) {
       if (lastGood === void 0) throw error;
       lastRaw = raw;
-      ctx.logger.error("llm-qoder: keeping the last good configuration after an invalid settings section");
+      ctx.logger.error("llm-qoder: keeping the last good configuration after an invalid settings update");
       ctx.logger.error(error);
       return lastGood;
     }
   };
   options();
+  ctx.inject(["settings"], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber));
+  });
   const resolveApiKey = async (connection) => {
     const ref = connection.apiKeyEnv;
     const credentials = ctx.get("credentials");
     if (credentials !== void 0) {
       const hit = await credentials.resolve(ref);
       if (hit !== void 0) return assertUsableApiKey(hit.value, "llm-qoder", ref);
-    } else {
-      const ambient = launchEnvironmentOf(ctx).get(ref);
-      if (ambient !== void 0 && ambient.value.length > 0) {
-        return assertUsableApiKey(ambient.value, "llm-qoder", ref);
-      }
+    }
+    const ambient = launchEnvironmentOf(ctx).get(ref);
+    if (ambient !== void 0 && ambient.value.length > 0) {
+      return assertUsableApiKey(ambient.value, "llm-qoder", ref);
     }
     const patAlias = launchEnvironmentOf(ctx).get("QODERCN_PAT");
     if (patAlias !== void 0 && patAlias.value.length > 0) {
@@ -1390,8 +1458,9 @@ function apply(ctx, config) {
     resolveApiKey,
     resolveAttachments: () => ctx.get("attachments")
   });
+  const settingsNs = ctx.fiber.entry?.options.id ?? NS;
   ctx.llm.registerConfigurableProviders([
-    { provider: PROVIDER, displayName: PROVIDER, settingsNs: NS, settingsPath: ["providers", PROVIDER] }
+    { provider: PROVIDER, displayName: PROVIDER, settingsNs, settingsPath: ["providers", PROVIDER] }
   ]);
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter);
   let registeredPolicy = options().retryPolicy;
@@ -1401,13 +1470,13 @@ function apply(ctx, config) {
     registration.replace([PROVIDER]);
     registeredPolicy = policy;
   };
-  ctx.inject(["settings"], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, NS, Config, config, {
-      setSource: (source) => {
-        current = source;
-      },
-      onChange: ensureRegistrationFacts
-    });
+  ctx.on("loader/volatile-update", () => {
+    try {
+      ensureRegistrationFacts();
+    } catch (error) {
+      ctx.logger.error("llm-qoder: keeping the last good configuration after an invalid settings update");
+      ctx.logger.error(error);
+    }
   });
 }
 export {
@@ -1415,6 +1484,7 @@ export {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  DONE,
   PUBLIC_GATEWAY_URL,
   QoderAdapter,
   apply,
@@ -1423,10 +1493,17 @@ export {
   fetchUserInfo,
   getQoderCNDirectModel,
   inject,
+  mapFinishReason,
+  mapUsage,
   name,
+  parseEnvelope,
   parseQoderModelCatalog,
+  parseQoderSse,
   qoderCnEndpoints,
   qoderEncodeBody,
   refreshJobToken,
-  resolveAdapterOptions
+  resolveAdapterOptions,
+  serializeMessages,
+  serializeRequest,
+  systemTextOf
 };

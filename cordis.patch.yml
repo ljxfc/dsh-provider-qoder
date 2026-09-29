@@ -1,7 +1,7 @@
-# Optional Qoder CN adapter. Install with:
-#   dsh plugin --profile web add github:minglu6/dsh-provider-qoder
-# Remove with:
-#   dsh plugin --profile web remove dsh-provider-qoder
+# Qoder CN adapter bundle and Models-page PAT card.
+# Desktop: Plugins -> Add plugin -> https://github.com/ljxfc/dsh-provider-qoder
+# CLI alternative: dsh plugin --profile web add https://github.com/ljxfc/dsh-provider-qoder
+# Remove with: dsh plugin --profile web remove dsh-provider-qoder
 
 - insert:
     - id: llm-qoder

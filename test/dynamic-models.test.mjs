@@ -40,7 +40,13 @@ function gmodel() {
   }
 }
 
-test('keeps an omitted catalog absent after Schemastery resolves defaults', () => {
+function valueOf(value) {
+  return value && typeof value === 'object' && typeof value.get === 'function'
+    ? value.get()
+    : value
+}
+
+test('keeps an omitted catalog absent inside the v0.1.7 volatile settings contract', () => {
   const resolved = new Config({
     providers: {
       'qoder-cn': {
@@ -49,8 +55,8 @@ test('keeps an omitted catalog absent after Schemastery resolves defaults', () =
       },
     },
   })
-  assert.equal(resolved.models, undefined)
-  assert.equal(resolved.providers['qoder-cn'].models, undefined)
+  assert.equal(valueOf(resolved.models), undefined)
+  assert.equal(valueOf(resolved.providers)['qoder-cn'].models, undefined)
 })
 
 test('parses enabled live models and rejects unusable listings', () => {
@@ -101,10 +107,15 @@ test('refreshes the signed live catalog and reuses it for exact-model resolution
     if (url.endsWith('/api/v1/userinfo')) {
       return Response.json({ id: 'user-test', email: 'user@example.com', name: 'Test User' })
     }
-    if (url.endsWith('/algo/api/v2/model/list')) {
+    if (url.endsWith('/algo/api/v2/model/list?Encode=1')) {
       catalogCalls += 1
       const authorization = new Headers(init.headers).get('authorization')
       assert.match(authorization ?? '', /^Bearer COSY\./)
+      assert.equal(new Headers(init.headers).get('cosy-version'), '1.1.38')
+      // A proxy dispatcher in front of the gateway can deliver a compressed
+      // body without its content-encoding header, so discovery must ask for
+      // an uncompressed response.
+      assert.equal(new Headers(init.headers).get('accept-encoding'), 'identity')
       assert.equal(init.method, 'GET')
       return Response.json({ chat: liveChat })
     }

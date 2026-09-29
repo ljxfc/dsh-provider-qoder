@@ -28,7 +28,10 @@ XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`
 
 /** Client identity the gateway recognises as the official qodercli desktop. */
-const QoderIDEVersion = '1.0.0'
+// Current qodercn uses this gateway identity. Older 1.0.0 headers can make
+// `/algo/api/v2/model/list` return a non-JSON gateway response even when PAT
+// exchange and userinfo succeeded.
+const QoderGatewayCosyVersion = '1.1.38'
 const QoderClientType = '5'
 const QoderDataPolicy = 'disagree'
 const QoderLoginVersion = 'v2'
@@ -184,7 +187,10 @@ export function qoderChatUrl(endpoints: QoderCnEndpoints): string {
  * @returns the absolute model-list URL.
  */
 export function qoderModelListUrl(endpoints: QoderCnEndpoints): string {
-  return `${endpoints.gateway}/algo/api/v2/model/list`
+  // qodercn marks the catalog request as an encoded gateway request too.
+  // Without Encode=1, the current gateway can return a non-JSON error page
+  // even after PAT exchange and userinfo have succeeded.
+  return `${endpoints.gateway}/algo/api/v2/model/list?Encode=1`
 }
 
 /**
@@ -359,7 +365,7 @@ export function buildQoderAuthHeaders(
     version: 'v1',
     requestId,
     info: infoB64,
-    cosyVersion: QoderIDEVersion,
+    cosyVersion: QoderGatewayCosyVersion,
     ideVersion: '',
   }
 
@@ -383,7 +389,7 @@ export function buildQoderAuthHeaders(
     'Cosy-Key': cosyKey,
     'Cosy-User': creds.userID,
     'Cosy-Date': timestamp,
-    'Cosy-Version': QoderIDEVersion,
+    'Cosy-Version': QoderGatewayCosyVersion,
     'Cosy-Machineid': machineID,
     'Cosy-Machinetoken': machineID,
     'Cosy-Machinetype': QoderMachineTypeMagic,

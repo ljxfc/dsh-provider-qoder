@@ -76,6 +76,9 @@ export async function exchangeJobToken(
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      // Uncompressed by request: a proxy dispatcher in front of the gateway can
+      // deliver an encoded body without its content-encoding header.
+      'Accept-Encoding': 'identity',
       'User-Agent': UA,
       'Cosy-Version': '1.0.1',
       'Cosy-ClientType': '5',
@@ -124,6 +127,8 @@ export async function refreshJobToken(
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      // Uncompressed by request; see the exchange request above.
+      'Accept-Encoding': 'identity',
       'User-Agent': UA,
       'Cosy-Version': '1.0.1',
       'Cosy-ClientType': '5',
@@ -170,6 +175,7 @@ export async function fetchUserInfo(
       headers: {
         Authorization: `Bearer ${jobToken}`,
         Accept: 'application/json',
+        'Accept-Encoding': 'identity',
         'User-Agent': UA,
         'Cosy-Version': '1.0.1',
         'Cosy-ClientType': '5',

@@ -33,7 +33,7 @@ import {
 } from './cosy.ts'
 import { qoderEncodeBody } from './qoder-encoding.ts'
 import { exchangeJobToken, fetchUserInfo, refreshJobToken, type QoderJobTokenSession } from './pat.ts'
-import { serializeMessages, transformTools, lastUserText } from './serialize.ts'
+import { serializeMessages, systemTextOf, transformTools, lastUserText } from './serialize.ts'
 import { parseQoderSse, DONE, parseEnvelope } from './sse.ts'
 import { translate } from './translate.ts'
 
@@ -309,6 +309,11 @@ export class QoderAdapter extends LlmAdapter {
         method: 'GET',
         headers: {
           Accept: 'application/json',
+          // The gateway compresses by default, and DSH installs a proxy
+          // dispatcher (HTTP_PROXY) whose responses can arrive without their
+          // content-encoding header, leaving the body undecodable. The catalog
+          // is small, so ask for it uncompressed and always get JSON.
+          'Accept-Encoding': 'identity',
           ...headers,
           ...attributionHeaders(),
         },
@@ -330,16 +335,33 @@ export class QoderAdapter extends LlmAdapter {
         { status: response.status },
       )
     }
-    let value: unknown
+    let payload: string
     try {
-      value = await response.json()
+      payload = await response.text()
     } catch (error: unknown) {
       if (signal?.aborted) {
         throw new LlmError('Qoder CN model discovery aborted by caller', 'ABORTED', { cause: error })
       }
-      throw new LlmError('Qoder CN model listing did not answer with JSON', 'DISCOVERY_FAILED', {
-        cause: error,
-      })
+      throw new LlmError('Qoder CN model listing could not be read', 'DISCOVERY_FAILED', { cause: error })
+    }
+    let value: unknown
+    try {
+      value = JSON.parse(payload)
+    } catch (error: unknown) {
+      if (signal?.aborted) {
+        throw new LlmError('Qoder CN model discovery aborted by caller', 'ABORTED', { cause: error })
+      }
+      // A non-JSON 200 is almost always an encoded body that arrived without
+      // its content-encoding header (a proxy dispatcher in front of the
+      // gateway). Surface enough of the response to tell that apart from a
+      // captive-portal or WAF page.
+      const contentType = response.headers.get('content-type') ?? 'none'
+      const preview = payload.slice(0, 120).replace(/[^\x20-\x7e]/g, '.')
+      throw new LlmError(
+        `Qoder CN model listing did not answer with JSON (content-type ${contentType}, ${payload.length} bytes): ${preview}`,
+        'DISCOVERY_FAILED',
+        { cause: error },
+      )
     }
     return parseQoderModelCatalog(value)
   }
@@ -412,7 +434,10 @@ export class QoderAdapter extends LlmAdapter {
     const attachments = this.config.resolveAttachments()
     const messages = await serializeMessages(options, attachments)
     const tools = transformTools(options)
-    const system = options.system ?? ''
+    // The dsh-v0.1.7 agent loop carries the rendered system prompt as a leading
+    // in-history system message; one-shot callers set `options.system`. Both
+    // belong in Qoder's request-level `system` field, never in a user turn.
+    const system = systemTextOf(options)
     const originalContent = lastUserText(options.messages)
 
     const requestId = crypto.randomUUID()
