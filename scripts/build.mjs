@@ -33,6 +33,7 @@ try {
       '@deepseek-ai/dsh-home-paths',
       '@deepseek-ai/dsh-attachment',
       '@deepseek-ai/dsh-util-values',
+      '@deepseek-ai/dsh-typert-protocol',
     ],
   })
   buildSync({

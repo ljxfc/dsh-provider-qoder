@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { Config, parseQoderModelCatalog, QoderAdapter } from '../dist/index.js'
+import { Config, getQoderCNDirectModel, getQoderCNFriendlyModelInfo, parseQoderModelCatalog, QoderAdapter } from '../dist/index.js'
 
 const endpoints = {
   gateway: 'https://tenant-gateway.vpc.qoder.com.cn',
@@ -69,8 +69,8 @@ test('parses enabled live models and rejects unusable listings', () => {
     ],
   }), [
     {
-      id: 'gmodel',
-      name: 'GLM-5.3',
+      id: 'glm-5.3',
+      name: 'GLM 5.3',
       contextWindow: 200_000,
       maxTokens: 32_768,
       inputModalities: ['text', 'image'],
@@ -130,11 +130,12 @@ test('refreshes the signed live catalog and reuses it for exact-model resolution
   const first = await adapter.listModels('qoder-cn')
   assert.deepEqual(first, [{
     provider: 'qoder-cn',
-    id: 'gmodel',
-    name: 'GLM-5.3',
+    id: 'glm-5.3',
+    name: 'GLM 5.3 · 图像 · 200K',
+    description: '图像 · 200K',
     inputModalities: ['text', 'image'],
   }])
-  const resolved = await adapter.resolveModel('qoder-cn', 'gmodel')
+  const resolved = await adapter.resolveModel('qoder-cn', 'glm-5.3')
   assert.equal(resolved.context.contextWindow, 200_000)
   assert.equal(resolved.defaultMaxTokens, 32_768)
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['off', 'high', 'max'])
@@ -147,8 +148,46 @@ test('refreshes the signed live catalog and reuses it for exact-model resolution
     max_input_tokens: 256_000,
   }]
   const refreshed = await adapter.listModels('qoder-cn')
-  assert.deepEqual(refreshed.map(model => model.id), ['gmodel', 'new-wire-model'])
+  assert.deepEqual(refreshed.map(model => model.id), ['glm-5.3', 'new-wire-model'])
   assert.equal(catalogCalls, 2)
+})
+
+test('every published model id maps back to the wire key that serves it', () => {
+  // The selector id and the wire key are two halves of one fact, and they used
+  // to be maintained by hand in two tables — which is how `qfmodel` (the live
+  // Qwen3.8-Flash key) came to be labelled "Qwen 3.6 Flash" and to send a
+  // retired key. Every live wire key must round-trip.
+  const liveKeys = [
+    'auto', 'qmodel_38max', 'qfmodel', 'qmodel_latest', 'qmodel', 'q37fmodel',
+    'dmodel', 'dfmodel', 'gmodel', 'gfmodel', 'gm51model', 'kmodel_latest',
+    'kmodel', 'mmodel',
+  ]
+  const seenIds = new Set()
+  for (const key of liveKeys) {
+    const identity = getQoderCNFriendlyModelInfo(key)
+    // `auto` is the one key whose published id is itself; every other key must
+    // resolve to a readable id rather than leaking its internal wire key.
+    if (key !== 'auto') assert.notEqual(identity.id, key, `${key} must resolve to a published id`)
+    assert.equal(getQoderCNDirectModel(identity.id), key, `${identity.id} must send ${key}`)
+    assert.equal(seenIds.has(identity.id), false, `${key} collides on id ${identity.id}`)
+    seenIds.add(identity.id)
+  }
+  // Qwen3.8-Flash is the model the picker could not offer: the live key is
+  // `qfmodel`, and it must not be confused with the retired `q36fmodel`.
+  assert.deepEqual(getQoderCNFriendlyModelInfo('qfmodel'), { id: 'qwen3.8-flash', name: 'Qwen 3.8 Flash' })
+  assert.equal(getQoderCNDirectModel('qwen3.8-flash'), 'qfmodel')
+  assert.deepEqual(getQoderCNFriendlyModelInfo('q36fmodel'), { id: 'qwen3.6-flash', name: 'Qwen 3.6 Flash' })
+  // Ids saved by earlier builds keep sending the key they always sent, so a
+  // resumed session does not silently switch models.
+  assert.equal(getQoderCNDirectModel('qwen3.6-flash'), 'q36fmodel')
+  assert.equal(getQoderCNDirectModel('kimi-k2.6'), 'kmodel')
+  assert.equal(getQoderCNDirectModel('glm-5.1'), 'gm51model')
+  assert.equal(getQoderCNDirectModel('minimax-m3'), 'mmodel')
+  assert.equal(getQoderCNDirectModel('qwen3.6-plus'), 'qmodel')
+  assert.equal(getQoderCNDirectModel('qoder-cn'), 'auto')
+  // A model released after this build stays addressable without an update.
+  assert.equal(getQoderCNDirectModel('brand-new-wire-key'), 'brand-new-wire-key')
+  assert.equal(getQoderCNDirectModel(undefined), 'auto')
 })
 
 test('uses an explicit static catalog without contacting Qoder discovery', async (t) => {

@@ -35,11 +35,87 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
+// src/usage-wire.ts
+var REMOTE_PACKAGE = "dsh-provider-qoder";
+var REMOTE_SERVICE = "qoderUsage";
+var REMOTE_NAMESPACE = "qoder";
+var QUOTA_ENDPOINT = "qoder/quota";
+function reject(field) {
+  throw new TypeError(`qoder/quota result: invalid ${field}`);
+}
+function record(value, field) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : reject(field);
+}
+function stringField(source, key) {
+  const value = source[key];
+  return typeof value === "string" ? value : reject(key);
+}
+function numberField(source, key) {
+  const value = source[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : reject(key);
+}
+function booleanField(source, key) {
+  const value = source[key];
+  return typeof value === "boolean" ? value : reject(key);
+}
+function parsePool(value, field) {
+  const source = record(value, field);
+  return {
+    total: numberField(source, "total"),
+    used: numberField(source, "used"),
+    remaining: numberField(source, "remaining"),
+    percentage: numberField(source, "percentage"),
+    unit: stringField(source, "unit"),
+    available: booleanField(source, "available")
+  };
+}
+function parseQuotaSnapshot(value) {
+  const source = record(value, "result");
+  const snapshot = {
+    planTierName: stringField(source, "planTierName"),
+    userType: stringField(source, "userType"),
+    isPaidPlan: booleanField(source, "isPaidPlan"),
+    isHighestTier: booleanField(source, "isHighestTier"),
+    organizationName: stringField(source, "organizationName"),
+    organizationRole: stringField(source, "organizationRole"),
+    periodStart: numberField(source, "periodStart"),
+    periodEnd: numberField(source, "periodEnd"),
+    personal: parsePool(source.personal, "personal"),
+    usageType: stringField(source, "usageType"),
+    totalPercentage: numberField(source, "totalPercentage"),
+    isQuotaExceeded: booleanField(source, "isQuotaExceeded"),
+    expiresAt: numberField(source, "expiresAt")
+  };
+  if (source.organizationPool !== void 0) {
+    snapshot.organizationPool = parsePool(source.organizationPool, "organizationPool");
+  }
+  if (source.addOnPool !== void 0) {
+    snapshot.addOnPool = parsePool(source.addOnPool, "addOnPool");
+  }
+  if (source.upgradeUrl !== void 0) {
+    snapshot.upgradeUrl = stringField(source, "upgradeUrl");
+  }
+  return snapshot;
+}
+var quotaSchema = { parse: parseQuotaSnapshot };
+var QUOTA_DESCRIPTOR = {
+  id: `${REMOTE_PACKAGE}#${QUOTA_ENDPOINT}`,
+  service: REMOTE_SERVICE,
+  namespace: REMOTE_NAMESPACE,
+  method: "quota",
+  invocation: { kind: "direct" },
+  parameters: [],
+  result: { mode: "strict", typeSymbol: `${REMOTE_PACKAGE}#QuotaSnapshotWire`, create: () => quotaSchema }
+};
+var QUOTA_REMOTE_CONTRIBUTION = {
+  package: REMOTE_PACKAGE,
+  descriptors: [QUOTA_DESCRIPTOR]
+};
+
 // src/client/card.tsx
 var React = __toESM(require("react"), 1);
 var import_react = require("react");
-var HIDDEN_STYLE = { display: "none" };
-var CARD_SLOT = "settings.models.provider-card";
+var SECTION_STYLE = { display: "grid", gap: "8px", padding: "12px 0" };
 function defaultText(key) {
   return {
     title: "Qoder CN",
@@ -51,56 +127,34 @@ function defaultText(key) {
     saving: "Saving\u2026",
     loading: "Loading\u2026",
     readOnly: "Credentials are read-only in this profile.",
-    saveFailed: "The PAT could not be stored. Try again."
+    saveFailed: "The PAT could not be stored. Try again.",
+    integrations: "Integrations & display",
+    quotaToggle: "Show the quota card in the sidebar",
+    quotaToggleHint: "Off by default; while off the sidebar renders no card and no background quota refresh runs.",
+    quotaToggleFailed: "The toggle could not be stored. Try again."
   }[key] ?? key;
-}
-function adjacentEditorCard(wrapper) {
-  if (wrapper === null) return null;
-  for (const sibling of [wrapper.previousElementSibling, wrapper.nextElementSibling]) {
-    if (sibling === null || typeof sibling !== "object") continue;
-    const candidate = sibling;
-    if (typeof candidate.className === "string" && candidate.className.includes("editor")) return candidate;
-  }
-  return null;
 }
 function QoderProviderCard(props) {
   const t = props.t ?? defaultText;
+  const quota = props.quotaSettings;
   const [snapshot, setSnapshot] = (0, import_react.useState)(() => props.credential.getSnapshot());
+  const [quotaSnapshot, setQuotaSnapshot] = (0, import_react.useState)(
+    () => quota?.getSnapshot()
+  );
   const [draft, setDraft] = (0, import_react.useState)("");
   const [saving, setSaving] = (0, import_react.useState)(false);
   const [failed, setFailed] = (0, import_react.useState)(false);
-  const [editorOpen, setEditorOpen] = (0, import_react.useState)(false);
+  const [quotaBusy, setQuotaBusy] = (0, import_react.useState)(false);
   const rootRef = (0, import_react.useRef)(null);
   (0, import_react.useEffect)(() => {
     setSnapshot(props.credential.getSnapshot());
     return props.credential.subscribe(() => setSnapshot(props.credential.getSnapshot()));
   }, [props.credential]);
   (0, import_react.useEffect)(() => {
-    const root = rootRef.current;
-    if (root === null || typeof MutationObserver === "undefined") return void 0;
-    const wrapper = root.closest(`[data-slot="${CARD_SLOT}"]`) ?? root.parentElement;
-    const row = wrapper?.parentElement;
-    if (wrapper === null || wrapper === void 0 || row === null || row === void 0) {
-      setEditorOpen(true);
-      return void 0;
-    }
-    let hiddenEditor = null;
-    const sync = () => {
-      const editor = adjacentEditorCard(wrapper);
-      setEditorOpen(editor !== null);
-      if (editor !== null && "style" in editor && editor.style !== void 0) {
-        editor.style.display = "none";
-        hiddenEditor = editor;
-      }
-    };
-    sync();
-    const observer = new MutationObserver(sync);
-    observer.observe(row, { childList: true, subtree: true });
-    return () => {
-      observer.disconnect();
-      if (hiddenEditor?.style !== void 0) hiddenEditor.style.display = "";
-    };
-  }, []);
+    if (quota === void 0) return void 0;
+    setQuotaSnapshot(quota.getSnapshot());
+    return quota.subscribe(() => setQuotaSnapshot(quota.getSnapshot()));
+  }, [quota]);
   const configured = snapshot.loading ? props.keyConfigured === true : snapshot.configured;
   const disabled = saving || !snapshot.writable;
   const save = async () => {
@@ -118,42 +172,453 @@ function QoderProviderCard(props) {
       setSaving(false);
     }
   };
-  return /* @__PURE__ */ React.createElement(
+  const quotaEnabled = quotaSnapshot?.enabled === true;
+  const quotaReadOnly = quotaSnapshot === void 0 || quotaSnapshot.loading || !quotaSnapshot.writable;
+  const toggleQuota = async (next) => {
+    if (quota === void 0 || quotaReadOnly || quotaBusy) return;
+    setQuotaBusy(true);
+    try {
+      await quota.set(next);
+    } catch {
+    } finally {
+      setQuotaBusy(false);
+    }
+  };
+  return /* @__PURE__ */ React.createElement("div", { ref: rootRef, "data-qoder-models-card": "true" }, /* @__PURE__ */ React.createElement("div", { style: SECTION_STYLE }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "8px" } }, /* @__PURE__ */ React.createElement("strong", null, t("title")), /* @__PURE__ */ React.createElement("span", null, snapshot.loading ? t("loading") : configured ? t("configured") : t("notConfigured"))), /* @__PURE__ */ React.createElement("label", { style: { display: "grid", gap: "4px" } }, /* @__PURE__ */ React.createElement("span", null, t("patLabel")), /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      type: "password",
+      autoComplete: "new-password",
+      spellCheck: false,
+      value: draft,
+      disabled,
+      onChange: (event) => {
+        setDraft(event.target.value);
+        setFailed(false);
+      }
+    }
+  )), /* @__PURE__ */ React.createElement("small", null, snapshot.writable ? t("patHint") : t("readOnly")), snapshot.error !== void 0 ? /* @__PURE__ */ React.createElement("small", { role: "status" }, snapshot.error) : null, failed ? /* @__PURE__ */ React.createElement("small", { role: "alert" }, t("saveFailed")) : null, /* @__PURE__ */ React.createElement("div", { style: { paddingBottom: "12px", borderBottom: "1px solid rgba(127,127,127,0.28)" } }, /* @__PURE__ */ React.createElement("button", { type: "button", disabled: disabled || draft.trim().length === 0, onClick: () => {
+    void save();
+  } }, saving ? t("saving") : t("save")))), quota === void 0 ? null : /* @__PURE__ */ React.createElement("section", { "data-qoder-integrations": "true", style: { display: "grid", gap: "6px", paddingBottom: "12px" } }, /* @__PURE__ */ React.createElement("strong", null, t("integrations")), /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: "8px" } }, /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      type: "checkbox",
+      "data-qoder-quota-toggle": "true",
+      checked: quotaEnabled,
+      disabled: quotaReadOnly || quotaBusy,
+      onChange: (event) => {
+        void toggleQuota(event.target.checked);
+      }
+    }
+  ), /* @__PURE__ */ React.createElement("span", null, t("quotaToggle"))), /* @__PURE__ */ React.createElement("small", { style: { opacity: 0.75 } }, t("quotaToggleHint")), quotaSnapshot?.failed === true ? /* @__PURE__ */ React.createElement("small", { role: "alert" }, t("quotaToggleFailed")) : null));
+}
+
+// src/client/copy.ts
+var PANEL_LOCALE_NS = "panel.qoder";
+var PANEL_TEXT_ZH = {
+  lang: "zh",
+  cardTitle: "\u989D\u5EA6",
+  cardHint: "\u67E5\u770B Qoder CN \u5957\u9910\u4E0E\u989D\u5EA6",
+  panelTitle: "Qoder CN \u5957\u9910\u4E0E\u989D\u5EA6",
+  close: "\u8FD4\u56DE\u4F1A\u8BDD",
+  closeHint: "\u5173\u95ED\u6B64\u9762\u677F\u5E76\u8FD4\u56DE\u5F53\u524D\u4F1A\u8BDD",
+  refresh: "\u5237\u65B0",
+  loading: "\u8BFB\u53D6\u4E2D\u2026",
+  unavailable: "\u5F53\u524D profile \u672A\u6302\u8F7D\u989D\u5EA6\u670D\u52A1\u3002",
+  notConfigured: "\u5C1A\u672A\u914D\u7F6E PAT\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u989D\u5EA6\u3002",
+  error: "\u989D\u5EA6\u8BFB\u53D6\u5931\u8D25",
+  plan: "\u5957\u9910",
+  account: "\u8D26\u6237\u7C7B\u578B",
+  organization: "\u7EC4\u7EC7",
+  role: "\u89D2\u8272",
+  billingCycle: "\u8BA1\u8D39\u5468\u671F",
+  personalPool: "\u4E2A\u4EBA\u5957\u9910\u989D\u5EA6",
+  organizationPool: "\u7EC4\u7EC7\u8D44\u6E90\u5305",
+  addOnPool: "\u8D2D\u4E70 / \u8D60\u9001\u989D\u5EA6",
+  used: "\u5DF2\u7528",
+  remaining: "\u5269\u4F59",
+  resetAt: "\u91CD\u7F6E\u65F6\u95F4",
+  noDeadline: "\u672A\u63D0\u4F9B",
+  dormant: "\u5F53\u524D\u672A\u542F\u7528",
+  exceeded: "\u989D\u5EA6\u5DF2\u7528\u5C3D",
+  upgrade: "\u5347\u7EA7\u5957\u9910",
+  refreshedAt: "\u66F4\u65B0\u4E8E",
+  never: "\u5C1A\u672A\u8BFB\u53D6",
+  settingsToggle: "\u5728\u4FA7\u8FB9\u680F\u663E\u793A\u989D\u5EA6\u5361\u7247",
+  settingsToggleHint: "\u9ED8\u8BA4\u5173\u95ED\uFF1B\u5173\u95ED\u65F6\u5DE6\u4FA7\u680F\u4E0D\u6E32\u67D3\u5361\u7247\uFF0C\u4E5F\u4E0D\u4F1A\u540E\u53F0\u5237\u65B0\u989D\u5EA6\u3002",
+  settingsToggleFailed: "\u5F00\u5173\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002"
+};
+var PANEL_TEXT_EN = {
+  lang: "en",
+  cardTitle: "Usage",
+  cardHint: "Qoder CN plan and quota",
+  panelTitle: "Qoder CN plan & quota",
+  close: "Back to conversation",
+  closeHint: "Close this panel and return to the current conversation",
+  refresh: "Refresh",
+  loading: "Loading\u2026",
+  unavailable: "The quota service is not mounted in this profile.",
+  notConfigured: "No PAT is configured yet, so quota cannot be read.",
+  error: "Could not read the quota",
+  plan: "Plan",
+  account: "Account",
+  organization: "Organization",
+  role: "Role",
+  billingCycle: "Billing cycle",
+  personalPool: "Personal plan credits",
+  organizationPool: "Organization package",
+  addOnPool: "Purchased / gifted credits",
+  used: "Used",
+  remaining: "Remaining",
+  resetAt: "Resets",
+  noDeadline: "Not reported",
+  dormant: "Not currently drawn on",
+  exceeded: "Quota exhausted",
+  upgrade: "Upgrade plan",
+  refreshedAt: "Updated",
+  never: "Never",
+  settingsToggle: "Show the quota card in the sidebar",
+  settingsToggleHint: "Off by default; while off the sidebar renders no card and no background quota refresh runs.",
+  settingsToggleFailed: "The toggle could not be stored. Try again."
+};
+function qoderPanelText(t) {
+  const key = t("lang");
+  return key === "zh" ? PANEL_TEXT_ZH : PANEL_TEXT_EN;
+}
+
+// src/client/panel.tsx
+var React2 = __toESM(require("react"), 1);
+var import_react2 = require("react");
+var QUOTA_PANEL_ID = "qoder-quota-panel";
+function formatCredits(value) {
+  const rounded = Math.round(value * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+}
+function formatRatio(ratio) {
+  return `${String(Math.round(Math.max(0, Math.min(1, ratio)) * 100))}%`;
+}
+function formatMoment(ms, lang) {
+  if (ms === void 0 || !Number.isFinite(ms)) return void 0;
+  try {
+    return new Date(ms).toLocaleString(lang === "zh" ? "zh-CN" : "en-US", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  } catch {
+    return new Date(ms).toISOString();
+  }
+}
+function QuotaBar(props) {
+  const percent = Math.round(Math.max(0, Math.min(1, props.ratio)) * 100);
+  return /* @__PURE__ */ React2.createElement(
     "div",
     {
-      ref: rootRef,
-      "data-qoder-models-card": "true",
-      style: editorOpen ? void 0 : HIDDEN_STYLE
+      role: "progressbar",
+      "aria-label": props.label,
+      "aria-valuemin": 0,
+      "aria-valuemax": 100,
+      "aria-valuenow": percent,
+      style: { height: "6px", borderRadius: "3px", background: "rgba(127,127,127,0.28)", overflow: "hidden" }
     },
-    editorOpen ? /* @__PURE__ */ React.createElement("div", { style: { padding: "12px 0", display: "grid", gap: "8px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "8px" } }, /* @__PURE__ */ React.createElement("strong", null, t("title")), /* @__PURE__ */ React.createElement("span", null, snapshot.loading ? t("loading") : configured ? t("configured") : t("notConfigured"))), /* @__PURE__ */ React.createElement("label", { style: { display: "grid", gap: "4px" } }, /* @__PURE__ */ React.createElement("span", null, t("patLabel")), /* @__PURE__ */ React.createElement(
-      "input",
-      {
-        type: "password",
-        autoComplete: "new-password",
-        spellCheck: false,
-        value: draft,
-        disabled,
-        onChange: (event) => {
-          setDraft(event.target.value);
-          setFailed(false);
-        }
+    /* @__PURE__ */ React2.createElement("div", { style: { width: `${String(percent)}%`, height: "100%", background: percent >= 100 ? "#d9534f" : "currentColor" } })
+  );
+}
+function QuotaRow(props) {
+  return /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px" } }, /* @__PURE__ */ React2.createElement("span", { style: { opacity: 0.7 } }, props.label), /* @__PURE__ */ React2.createElement("span", null, props.value));
+}
+function QuotaPool(props) {
+  const { t, pool } = props;
+  const ratio = pool.total > 0 ? pool.used / pool.total : pool.percentage;
+  const reset = formatMoment(props.expiresAt, t.lang) ?? t.noDeadline;
+  return /* @__PURE__ */ React2.createElement("div", { style: { display: "grid", gap: "6px", padding: "10px 12px", border: "1px solid rgba(127,127,127,0.3)", borderRadius: "8px" } }, /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px" } }, /* @__PURE__ */ React2.createElement("strong", null, props.title), props.dormant === true ? /* @__PURE__ */ React2.createElement("em", null, t.dormant) : /* @__PURE__ */ React2.createElement("span", null, formatRatio(ratio))), /* @__PURE__ */ React2.createElement(QuotaBar, { ratio, label: props.title }), /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.used, value: `${formatCredits(pool.used)} / ${formatCredits(pool.total)} ${pool.unit}` }), /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.remaining, value: `${formatCredits(pool.remaining)} ${pool.unit}` }), /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.resetAt, value: reset }));
+}
+function useView(props) {
+  const t = qoderPanelText(props.t ?? ((key) => PANEL_TEXT_EN[key] ?? key));
+  const snapshot = props.useQuota?.((state) => state) ?? { status: "idle" };
+  return { t, snapshot, report: snapshot.report };
+}
+function QoderQuotaFooterEntry(props) {
+  const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
+  const { t, snapshot, report } = useView(props);
+  const startAutoRefresh = props.startAutoRefresh;
+  (0, import_react2.useEffect)(() => {
+    if (!enabled || startAutoRefresh === void 0) return void 0;
+    return startAutoRefresh();
+  }, [enabled, startAutoRefresh]);
+  if (!enabled) return null;
+  const summary = report === void 0 ? snapshot.status === "loading" ? t.loading : t.error : `${report.planTierName} \xB7 ${formatRatio(report.totalPercentage)}`;
+  return /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      type: "button",
+      "data-qoder-quota-card": "true",
+      title: t.cardHint,
+      onClick: () => {
+        props.open?.();
+      },
+      style: {
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: "8px",
+        width: "100%",
+        padding: "8px 10px",
+        border: "1px solid rgba(127,127,127,0.35)",
+        borderRadius: "8px",
+        background: "transparent",
+        color: "inherit",
+        cursor: "pointer",
+        font: "inherit",
+        textAlign: "left"
       }
-    )), /* @__PURE__ */ React.createElement("small", null, snapshot.writable ? t("patHint") : t("readOnly")), snapshot.error !== void 0 ? /* @__PURE__ */ React.createElement("small", { role: "status" }, snapshot.error) : null, failed ? /* @__PURE__ */ React.createElement("small", { role: "alert" }, t("saveFailed")) : null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("button", { type: "button", disabled: disabled || draft.trim().length === 0, onClick: () => {
-      void save();
-    } }, saving ? t("saving") : t("save")))) : null
+    },
+    /* @__PURE__ */ React2.createElement("span", null, t.cardTitle),
+    /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.75 } }, summary)
+  );
+}
+function QoderQuotaPanel(props) {
+  const { t, snapshot, report } = useView(props);
+  const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
+  const startAutoRefresh = props.startAutoRefresh;
+  (0, import_react2.useEffect)(() => {
+    if (startAutoRefresh === void 0) return void 0;
+    return startAutoRefresh();
+  }, [startAutoRefresh]);
+  const refreshed = snapshot.fetchedAt === void 0 ? t.never : formatMoment(snapshot.fetchedAt, t.lang) ?? t.never;
+  const personal = report?.personal;
+  const organization = report?.organizationPool;
+  const organizationActive = organization !== void 0 && organization.available !== false;
+  return /* @__PURE__ */ React2.createElement(
+    "section",
+    {
+      "data-qoder-quota-panel": "true",
+      style: { display: "grid", gap: "12px", alignContent: "start", padding: "16px 20px", overflow: "auto", height: "100%" }
+    },
+    /* @__PURE__ */ React2.createElement("header", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" } }, /* @__PURE__ */ React2.createElement("h2", { style: { margin: 0, fontSize: "1.1em" } }, t.panelTitle), /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px" } }, /* @__PURE__ */ React2.createElement("button", { type: "button", onClick: () => {
+      props.refresh?.();
+    }, disabled: snapshot.status === "loading" }, snapshot.status === "loading" ? t.loading : t.refresh), /* @__PURE__ */ React2.createElement(
+      "button",
+      {
+        type: "button",
+        "aria-label": t.close,
+        title: t.closeHint,
+        onClick: () => {
+          props.close?.();
+        },
+        style: { border: "none", background: "transparent", color: "inherit", cursor: "pointer", fontSize: "1.2em", lineHeight: 1 }
+      },
+      /* @__PURE__ */ React2.createElement("span", { "aria-hidden": "true" }, "\xD7")
+    ))),
+    report?.isQuotaExceeded === true ? /* @__PURE__ */ React2.createElement("div", { role: "alert", style: { padding: "8px 12px", border: "1px solid #d9534f", borderRadius: "8px" } }, t.exceeded) : null,
+    snapshot.status === "error" ? /* @__PURE__ */ React2.createElement("div", { role: "alert", style: { display: "grid", gap: "6px" } }, /* @__PURE__ */ React2.createElement("span", null, t.error), snapshot.error !== void 0 ? /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.7 } }, snapshot.error) : null) : null,
+    report === void 0 ? null : /* @__PURE__ */ React2.createElement("div", { style: { display: "grid", gap: "6px" } }, /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.plan, value: report.planTierName }), /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.account, value: report.userType }), report.organizationName === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.organization, value: report.organizationName }), report.organizationRole === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.role, value: report.organizationRole }), /* @__PURE__ */ React2.createElement(
+      QuotaRow,
+      {
+        label: t.billingCycle,
+        value: `${formatMoment(report.periodStart, t.lang) ?? t.noDeadline} \u2192 ${formatMoment(report.periodEnd, t.lang) ?? t.noDeadline}`
+      }
+    )),
+    personal === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaPool, { t, title: t.personalPool, pool: personal, expiresAt: report?.expiresAt }),
+    organization === void 0 ? null : /* @__PURE__ */ React2.createElement(
+      QuotaPool,
+      {
+        t,
+        title: t.organizationPool,
+        pool: organization,
+        expiresAt: report?.expiresAt,
+        ...organizationActive ? {} : { dormant: true }
+      }
+    ),
+    report?.addOnPool === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaPool, { t, title: t.addOnPool, pool: report.addOnPool, expiresAt: report.expiresAt }),
+    /* @__PURE__ */ React2.createElement("footer", { style: { display: "flex", justifyContent: "space-between", gap: "12px", opacity: 0.7 } }, /* @__PURE__ */ React2.createElement("small", null, `${t.refreshedAt} ${refreshed}`), report?.upgradeUrl === void 0 ? null : /* @__PURE__ */ React2.createElement("a", { href: report.upgradeUrl, target: "_blank", rel: "noreferrer" }, t.upgrade)),
+    enabled ? null : /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.7 } }, t.settingsToggleHint)
   );
 }
 
-// src/client/index.ts
+// src/client/quota.ts
+var QUOTA_AUTO_REFRESH_MS = 12e4;
+function createQuotaController(resolve) {
+  let snapshot = { status: "idle" };
+  let inFlight;
+  let generation = 0;
+  const listeners = /* @__PURE__ */ new Set();
+  const publish = () => {
+    for (const listener of listeners) listener();
+  };
+  const load = async () => {
+    const ticket = ++generation;
+    snapshot = { ...snapshot, status: "loading" };
+    publish();
+    const namespace = resolve();
+    if (namespace === void 0) {
+      if (ticket !== generation) return;
+      snapshot = {
+        status: "error",
+        error: "the qoder/quota remote is not mounted",
+        ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
+      };
+      publish();
+      return;
+    }
+    try {
+      const response = await namespace.quota();
+      if (ticket !== generation) return;
+      snapshot = response.ok ? { status: "ready", report: response.value, fetchedAt: Date.now() } : {
+        status: "error",
+        error: response.error?.message ?? "the quota read failed",
+        ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
+      };
+    } catch (error) {
+      if (ticket !== generation) return;
+      snapshot = {
+        status: "error",
+        error: error instanceof Error ? error.message : String(error),
+        ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
+      };
+    }
+    publish();
+  };
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    refresh: () => {
+      inFlight ??= load().finally(() => {
+        inFlight = void 0;
+      });
+      return inFlight;
+    }
+  };
+}
+var REAL_TIMER = {
+  set: (callback, ms) => setTimeout(callback, ms),
+  clear: (handle2) => {
+    clearTimeout(handle2);
+  }
+};
+function startQuotaAutoRefresh(controller, isVisible, timer = REAL_TIMER) {
+  references += 1;
+  const ticket = ++ticketSeq;
+  const tick = () => {
+    if (activeTicket !== ticket) return;
+    if (isVisible()) void controller.refresh();
+    handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS);
+  };
+  if (activeTicket === void 0) {
+    activeTicket = ticket;
+    handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS);
+    if (isVisible()) void controller.refresh();
+  }
+  return () => {
+    references -= 1;
+    if (references > 0 || activeTicket !== ticket) return;
+    activeTicket = void 0;
+    if (handle !== void 0) timer.clear(handle);
+    handle = void 0;
+  };
+}
+var references = 0;
+var ticketSeq = 0;
+var activeTicket;
+var handle;
+
+// src/client/settings.ts
 var SETTINGS_NS = "llm-qoder";
-var PROVIDER = "qoder-cn";
-var DEFAULT_REF = "QODERCN_PERSONAL_ACCESS_TOKEN";
+var SHOW_SIDEBAR_QUOTA_FIELD = "showSidebarQuota";
 function recordOf(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
+function rowFor(response) {
+  if (!response.ok) return void 0;
+  return response.value.namespaces?.find((entry) => entry.ns === SETTINGS_NS);
+}
+function createQuotaSettingsFace(resolve) {
+  let snapshot = { enabled: false, loading: true, writable: true, failed: false };
+  let revision;
+  const listeners = /* @__PURE__ */ new Set();
+  const publish = () => {
+    for (const listener of listeners) listener();
+  };
+  const refresh = async () => {
+    const settings = resolve();
+    if (settings === void 0) {
+      snapshot = { enabled: false, loading: false, writable: false, failed: false };
+      publish();
+      return;
+    }
+    try {
+      const response = await settings.describe();
+      const row = rowFor(response);
+      if (row !== void 0 && typeof row.revision === "number") revision = row.revision;
+      const value = recordOf(row?.value);
+      snapshot = {
+        enabled: value?.[SHOW_SIDEBAR_QUOTA_FIELD] === true,
+        loading: false,
+        writable: response.ok ? response.value.writable !== false : false,
+        failed: false
+      };
+    } catch {
+      snapshot = { ...snapshot, loading: false, writable: false, failed: true };
+    }
+    publish();
+  };
+  void refresh();
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    refresh,
+    set: async (value) => {
+      const settings = resolve();
+      if (settings === void 0) {
+        snapshot = { ...snapshot, failed: true };
+        publish();
+        return false;
+      }
+      try {
+        let response = await settings.mutate(
+          SETTINGS_NS,
+          [{ op: "set", path: [SHOW_SIDEBAR_QUOTA_FIELD], value }],
+          revision
+        );
+        if (!response.ok) {
+          await refresh();
+          response = await settings.mutate(
+            SETTINGS_NS,
+            [{ op: "set", path: [SHOW_SIDEBAR_QUOTA_FIELD], value }],
+            revision
+          );
+        }
+        await refresh();
+        const accepted = response.ok;
+        snapshot = { ...snapshot, failed: !accepted, enabled: accepted ? value : snapshot.enabled };
+        publish();
+        return accepted;
+      } catch {
+        snapshot = { ...snapshot, failed: true };
+        publish();
+        return false;
+      }
+    }
+  };
+}
+
+// src/client/index.ts
+var PROVIDER = "qoder-cn";
+var DEFAULT_REF = "QODERCN_PERSONAL_ACCESS_TOKEN";
+function recordOf2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
 function stringAt(value, key) {
-  const record = recordOf(value);
-  const candidate = record?.[key];
+  const record2 = recordOf2(value);
+  const candidate = record2?.[key];
   return typeof candidate === "string" && candidate.trim().length > 0 ? candidate.trim() : void 0;
 }
 async function apiKeyRef(settings) {
@@ -163,7 +628,7 @@ async function apiKeyRef(settings) {
     if (!response.ok) return DEFAULT_REF;
     const namespace = response.value.namespaces?.find((entry) => entry.ns === SETTINGS_NS);
     const root = namespace?.value;
-    const providers = recordOf(recordOf(root)?.providers);
+    const providers = recordOf2(recordOf2(root)?.providers);
     return stringAt(providers?.[PROVIDER], "apiKeyEnv") ?? stringAt(root, "apiKeyEnv") ?? DEFAULT_REF;
   } catch {
     return DEFAULT_REF;
@@ -234,6 +699,11 @@ function createCredentialFace(credentials, settings) {
     }
   };
 }
+function selectPanel(ctx, id) {
+  const get = ctx.get;
+  const layout = typeof get === "function" ? get.call(ctx, "layout") : void 0;
+  layout?.selectPanel(id);
+}
 var locale = {
   zh: {
     title: "Qoder CN",
@@ -245,7 +715,11 @@ var locale = {
     saving: "\u4FDD\u5B58\u4E2D\u2026",
     loading: "\u8BFB\u53D6\u4E2D\u2026",
     readOnly: "\u5F53\u524D profile \u7684\u51ED\u636E\u4E0D\u53EF\u5199\u3002",
-    saveFailed: "PAT \u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002"
+    saveFailed: "PAT \u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002",
+    integrations: "\u96C6\u6210\u4E0E\u663E\u793A",
+    quotaToggle: "\u5728\u4FA7\u8FB9\u680F\u663E\u793A\u989D\u5EA6\u5361\u7247",
+    quotaToggleHint: "\u9ED8\u8BA4\u5173\u95ED\uFF1B\u5173\u95ED\u65F6\u5DE6\u4FA7\u680F\u4E0D\u6E32\u67D3\u5361\u7247\uFF0C\u4E5F\u4E0D\u4F1A\u540E\u53F0\u5237\u65B0\u989D\u5EA6\u3002",
+    quotaToggleFailed: "\u5F00\u5173\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002"
   },
   en: {
     title: "Qoder CN",
@@ -257,27 +731,85 @@ var locale = {
     saving: "Saving\u2026",
     loading: "Loading\u2026",
     readOnly: "Credentials are read-only in this profile.",
-    saveFailed: "The PAT could not be stored. Try again."
+    saveFailed: "The PAT could not be stored. Try again.",
+    integrations: "Integrations & display",
+    quotaToggle: "Show the quota card in the sidebar",
+    quotaToggleHint: "Off by default; while off the sidebar renders no card and no background quota refresh runs.",
+    quotaToggleFailed: "The toggle could not be stored. Try again."
   }
 };
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register("settings.qoder", locale));
+  ctx.effect(() => ctx.locale.register(PANEL_LOCALE_NS, { zh: PANEL_TEXT_ZH, en: PANEL_TEXT_EN }));
+  let settings;
+  const quotaSettings = createQuotaSettingsFace(() => settings);
+  let quotaNamespace;
+  const quota = createQuotaController(() => quotaNamespace);
+  void ctx.remote.$mount(QUOTA_REMOTE_CONTRIBUTION).then(
+    (dispose) => {
+      ctx.effect(() => () => {
+        void dispose();
+      }, "dsh-provider-qoder: quota remote");
+    },
+    (error) => {
+      console.error("[dsh-provider-qoder] could not mount the quota remote:", error);
+    }
+  );
+  ctx.inject(["remote.qoder"], (quotaCtx) => {
+    quotaNamespace = quotaCtx.remote.qoder;
+    void quota.refresh();
+    quotaCtx.effect(() => () => {
+      quotaNamespace = void 0;
+    });
+  });
+  const panelFace = () => ({
+    hooks: { quota, quotaSettings },
+    refresh: () => {
+      void quota.refresh();
+    },
+    // `visible` is the only gate on the background poll: while the toggle is
+    // off nothing is rendered AND nothing is refreshed.
+    startAutoRefresh: () => startQuotaAutoRefresh(quota, () => quotaSettings.getSnapshot().enabled),
+    open: () => {
+      selectPanel(ctx, QUOTA_PANEL_ID);
+    },
+    close: () => {
+      selectPanel(ctx, null);
+    }
+  });
+  try {
+    ctx.slots.inject("main", () => ctx.slots.register(
+      { name: "main", key: QUOTA_PANEL_ID, locale: PANEL_LOCALE_NS, inject: panelFace },
+      QoderQuotaPanel
+    ));
+  } catch (error) {
+    console.error("[dsh-provider-qoder] could not register the quota panel:", error);
+  }
+  ctx.inject(["layout"], (layoutCtx) => {
+    try {
+      layoutCtx.slots.inject("sidebar.footer.action", () => layoutCtx.slots.register(
+        { name: "sidebar.footer.action", id: QUOTA_PANEL_ID, order: 1, locale: PANEL_LOCALE_NS, inject: panelFace },
+        QoderQuotaFooterEntry
+      ));
+    } catch (error) {
+      console.error("[dsh-provider-qoder] could not register the sidebar quota card:", error);
+    }
+  });
+  ctx.inject(["remote.settings"], (settingsCtx) => {
+    settings = settingsCtx.remote.settings;
+    void quotaSettings.refresh();
+    settingsCtx.effect(() => () => {
+      settings = void 0;
+    });
+  });
   ctx.inject(["remote.credentials"], (credentialsCtx) => {
     const credentials = credentialsCtx.remote.credentials;
-    let settings;
     const face = createCredentialFace(credentials, () => settings);
-    ctx.inject(["remote.settings"], (settingsCtx) => {
-      settings = settingsCtx.remote.settings;
-      void face.refresh();
-      settingsCtx.effect(() => () => {
-        settings = void 0;
-      });
-    });
     ctx.slots.inject("settings.models.provider-card", () => ctx.slots.register({
       name: "settings.models.provider-card",
       key: SETTINGS_NS,
       locale: "settings.qoder",
-      inject: () => ({ credential: face })
+      inject: () => ({ credential: face, quotaSettings })
     }, QoderProviderCard));
   });
 }

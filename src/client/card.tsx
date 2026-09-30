@@ -1,14 +1,23 @@
 /**
- * Qoder's credential editor for the dsh 0.1.7 Models page.
+ * Qoder's provider card for 设置 → 模型.
  *
- * dsh 0.1.7 renders an unknown provider family with a generic editor that has
- * no API-key field. This keyed provider-card slot supplies that one missing
- * control and writes the PAT through the Host credentials service. The PAT is
- * never put into the settings document or echoed back into the input.
+ * Two blocks, mirroring how the Command Code provider presents itself:
+ *
+ * - `账户` — the PAT editor. dsh renders an unknown provider family with a
+ *   generic editor that has no API-key field, so this keyed provider-card slot
+ *   supplies that one control and writes the PAT through the Host credentials
+ *   service. The PAT is never put into the settings document or echoed back
+ *   into the input.
+ * - `集成与显示` — the `showSidebarQuota` toggle. It is the only switch for the
+ *   sidebar quota card, and the same flag gates the background refresh.
+ *
+ * The card renders unconditionally: the row it sits in is owned by the Models
+ * page, so nothing here may depend on the shape of its neighbours.
  */
 
 import * as React from 'react'
 import { useEffect, useRef, useState } from 'react'
+import type { QoderQuotaSettingsFace, QoderQuotaSettingsSnapshot } from './settings.ts'
 
 export interface QoderCredentialSnapshot {
   ref: string
@@ -28,12 +37,13 @@ export interface QoderCredentialFace {
 export interface QoderProviderCardProps {
   t?: (key: string) => string
   credential: QoderCredentialFace
+  /** The `showSidebarQuota` toggle; absent when the settings remote is unmounted. */
+  quotaSettings?: QoderQuotaSettingsFace
   provider?: { active?: boolean }
   keyConfigured?: boolean
 }
 
-const HIDDEN_STYLE = { display: 'none' } as const
-const CARD_SLOT = 'settings.models.provider-card'
+const SECTION_STYLE = { display: 'grid', gap: '8px', padding: '12px 0' } as const
 
 function defaultText(key: string): string {
   return ({
@@ -47,28 +57,25 @@ function defaultText(key: string): string {
     loading: 'Loading…',
     readOnly: 'Credentials are read-only in this profile.',
     saveFailed: 'The PAT could not be stored. Try again.',
+    integrations: 'Integrations & display',
+    quotaToggle: 'Show the quota card in the sidebar',
+    quotaToggleHint: 'Off by default; while off the sidebar renders no card and no background quota refresh runs.',
+    quotaToggleFailed: 'The toggle could not be stored. Try again.',
   } as Record<string, string>)[key] ?? key
-}
-
-/** Find the official unknown-family editor beside this slot outlet. */
-export function adjacentEditorCard(wrapper: { previousElementSibling?: unknown; nextElementSibling?: unknown } | null): { style?: { display?: string }; className?: unknown } | null {
-  if (wrapper === null) return null
-  for (const sibling of [wrapper.previousElementSibling, wrapper.nextElementSibling]) {
-    if (sibling === null || typeof sibling !== 'object') continue
-    const candidate = sibling as { className?: unknown }
-    if (typeof candidate.className === 'string' && candidate.className.includes('editor')) return candidate
-  }
-  return null
 }
 
 /** Render one Qoder Models-card occurrence. */
 export function QoderProviderCard(props: QoderProviderCardProps): React.ReactElement {
   const t = props.t ?? defaultText
+  const quota = props.quotaSettings
   const [snapshot, setSnapshot] = useState(() => props.credential.getSnapshot())
+  const [quotaSnapshot, setQuotaSnapshot] = useState<QoderQuotaSettingsSnapshot | undefined>(
+    () => quota?.getSnapshot(),
+  )
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
-  const [editorOpen, setEditorOpen] = useState(false)
+  const [quotaBusy, setQuotaBusy] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -77,31 +84,10 @@ export function QoderProviderCard(props: QoderProviderCardProps): React.ReactEle
   }, [props.credential])
 
   useEffect(() => {
-    const root = rootRef.current
-    if (root === null || typeof MutationObserver === 'undefined') return undefined
-    const wrapper = root.closest(`[data-slot="${CARD_SLOT}"]`) ?? root.parentElement
-    const row = wrapper?.parentElement
-    if (wrapper === null || wrapper === undefined || row === null || row === undefined) {
-      setEditorOpen(true)
-      return undefined
-    }
-    let hiddenEditor: { style?: { display?: string } } | null = null
-    const sync = () => {
-      const editor = adjacentEditorCard(wrapper)
-      setEditorOpen(editor !== null)
-      if (editor !== null && 'style' in editor && editor.style !== undefined) {
-        editor.style.display = 'none'
-        hiddenEditor = editor
-      }
-    }
-    sync()
-    const observer = new MutationObserver(sync)
-    observer.observe(row, { childList: true, subtree: true })
-    return () => {
-      observer.disconnect()
-      if (hiddenEditor?.style !== undefined) hiddenEditor.style.display = ''
-    }
-  }, [])
+    if (quota === undefined) return undefined
+    setQuotaSnapshot(quota.getSnapshot())
+    return quota.subscribe(() => setQuotaSnapshot(quota.getSnapshot()))
+  }, [quota])
 
   const configured = snapshot.loading ? props.keyConfigured === true : snapshot.configured
   const disabled = saving || !snapshot.writable
@@ -121,39 +107,67 @@ export function QoderProviderCard(props: QoderProviderCardProps): React.ReactEle
     }
   }
 
+  const quotaEnabled = quotaSnapshot?.enabled === true
+  const quotaReadOnly = quotaSnapshot === undefined
+    || quotaSnapshot.loading
+    || !quotaSnapshot.writable
+  const toggleQuota = async (next: boolean): Promise<void> => {
+    if (quota === undefined || quotaReadOnly || quotaBusy) return
+    setQuotaBusy(true)
+    try {
+      await quota.set(next)
+    } catch {
+      // `set` reports its own failure through the snapshot; nothing to add.
+    } finally {
+      setQuotaBusy(false)
+    }
+  }
+
   return (
-    <div
-      ref={rootRef}
-      data-qoder-models-card="true"
-      style={editorOpen ? undefined : HIDDEN_STYLE}
-    >
-      {editorOpen ? (
-        <div style={{ padding: '12px 0', display: 'grid', gap: '8px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
-            <strong>{t('title')}</strong>
-            <span>{snapshot.loading ? t('loading') : configured ? t('configured') : t('notConfigured')}</span>
-          </div>
-          <label style={{ display: 'grid', gap: '4px' }}>
-            <span>{t('patLabel')}</span>
-            <input
-              type="password"
-              autoComplete="new-password"
-              spellCheck={false}
-              value={draft}
-              disabled={disabled}
-              onChange={(event) => { setDraft(event.target.value); setFailed(false) }}
-            />
-          </label>
-          <small>{snapshot.writable ? t('patHint') : t('readOnly')}</small>
-          {snapshot.error !== undefined ? <small role="status">{snapshot.error}</small> : null}
-          {failed ? <small role="alert">{t('saveFailed')}</small> : null}
-          <div>
-            <button type="button" disabled={disabled || draft.trim().length === 0} onClick={() => { void save() }}>
-              {saving ? t('saving') : t('save')}
-            </button>
-          </div>
+    <div ref={rootRef} data-qoder-models-card="true">
+      <div style={SECTION_STYLE}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+          <strong>{t('title')}</strong>
+          <span>{snapshot.loading ? t('loading') : configured ? t('configured') : t('notConfigured')}</span>
         </div>
-      ) : null}
+        <label style={{ display: 'grid', gap: '4px' }}>
+          <span>{t('patLabel')}</span>
+          <input
+            type="password"
+            autoComplete="new-password"
+            spellCheck={false}
+            value={draft}
+            disabled={disabled}
+            onChange={(event) => { setDraft(event.target.value); setFailed(false) }}
+          />
+        </label>
+        <small>{snapshot.writable ? t('patHint') : t('readOnly')}</small>
+        {snapshot.error !== undefined ? <small role="status">{snapshot.error}</small> : null}
+        {failed ? <small role="alert">{t('saveFailed')}</small> : null}
+        <div style={{ paddingBottom: '12px', borderBottom: '1px solid rgba(127,127,127,0.28)' }}>
+          <button type="button" disabled={disabled || draft.trim().length === 0} onClick={() => { void save() }}>
+            {saving ? t('saving') : t('save')}
+          </button>
+        </div>
+      </div>
+
+      {quota === undefined ? null : (
+        <section data-qoder-integrations="true" style={{ display: 'grid', gap: '6px', paddingBottom: '12px' }}>
+          <strong>{t('integrations')}</strong>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              type="checkbox"
+              data-qoder-quota-toggle="true"
+              checked={quotaEnabled}
+              disabled={quotaReadOnly || quotaBusy}
+              onChange={(event) => { void toggleQuota(event.target.checked) }}
+            />
+            <span>{t('quotaToggle')}</span>
+          </label>
+          <small style={{ opacity: 0.75 }}>{t('quotaToggleHint')}</small>
+          {quotaSnapshot?.failed === true ? <small role="alert">{t('quotaToggleFailed')}</small> : null}
+        </section>
+      )}
     </div>
   )
 }

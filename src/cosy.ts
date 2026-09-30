@@ -193,46 +193,51 @@ export function qoderModelListUrl(endpoints: QoderCnEndpoints): string {
   return `${endpoints.gateway}/algo/api/v2/model/list?Encode=1`
 }
 
-/**
- * Map a Qoder CN deployment-facing model id to its wire key, passing unknown
- * ids through unchanged.
- * @param modelID - the deployment-facing id (`deepseek-v4-pro`, `auto`, …).
- * @returns the wire key the gateway expects.
- */
-export function getQoderCNDirectModel(modelID?: string): string {
-  return (
-    {
-      'qoder-cn': 'auto',
-      'qwen3.7-max': 'qmodel_latest',
-      'qwen3.7-plus': 'qmodel',
-      'qwen3.6-plus': 'qmodel',
-      'qwen3.6-flash': 'q36fmodel',
-      'deepseek-v4-pro': 'dmodel',
-      'deepseek-v4-flash': 'dfmodel',
-      'glm-5.2': 'gm51model',
-      'glm-5.1': 'gm51model',
-      'kimi-k2.6': 'kmodel',
-      'minimax-m2.7': 'mmodel',
-      'minimax-m3': 'mmodel',
-    }[modelID || ''] ||
-    modelID ||
-    'auto'
-  )
-}
-
+/** Canonical selector identity for every wire key the CN gateway serves today. */
 const qoderCNFriendlyModels: Readonly<Record<string, { id: string; name: string }>> = {
   auto: { id: 'auto', name: 'Auto' },
-  'qoder-cn': { id: 'qoder-cn', name: 'Auto' },
+  qmodel_38max: { id: 'qwen3.8-max', name: 'Qwen 3.8 Max' },
+  qfmodel: { id: 'qwen3.8-flash', name: 'Qwen 3.8 Flash' },
   qmodel_latest: { id: 'qwen3.7-max', name: 'Qwen 3.7 Max' },
   qmodel: { id: 'qwen3.7-plus', name: 'Qwen 3.7 Plus' },
-  q36fmodel: { id: 'qwen3.6-flash', name: 'Qwen 3.6 Flash' },
-  qfmodel: { id: 'qwen3.6-flash', name: 'Qwen 3.6 Flash' },
+  q37fmodel: { id: 'qwen3.7-flash', name: 'Qwen 3.7 Flash' },
   dmodel: { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
   dfmodel: { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+  gmodel: { id: 'glm-5.3', name: 'GLM 5.3' },
+  gfmodel: { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash' },
   gm51model: { id: 'glm-5.2', name: 'GLM 5.2' },
-  kmodel: { id: 'kimi-k2.6', name: 'Kimi K2.6' },
+  kmodel_latest: { id: 'kimi-k3', name: 'Kimi K3' },
+  kmodel: { id: 'kimi-k2.8-preview', name: 'Kimi K2.8 Preview' },
   mmodel: { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
+  // Retired from the live catalog but still accepted by the gateway, so a
+  // session saved against it keeps its id AND its label instead of degrading to
+  // a prettified wire key.
+  q36fmodel: { id: 'qwen3.6-flash', name: 'Qwen 3.6 Flash' },
 }
+
+/**
+ * Ids earlier builds published, mapped to the wire key they have always sent.
+ * The selector id is the durable half of a saved session, so a rename here must
+ * never change which model an existing session resumes on.
+ */
+const qoderCNLegacyModelKeys: Readonly<Record<string, string>> = {
+  'qoder-cn': 'auto',
+  'qwen3.6-max': 'qmodel_latest',
+  'qwen3.6-plus': 'qmodel',
+  'qwen3.6-flash': 'q36fmodel',
+  'glm-5.1': 'gm51model',
+  'kimi-k2.6': 'kmodel',
+  'minimax-m3': 'mmodel',
+}
+
+/**
+ * Wire key per selector id, derived by inverting {@link qoderCNFriendlyModels}:
+ * a key listed in one direction is addressable from the other, so an id or a
+ * label can never again drift away from the key the gateway actually serves.
+ */
+const qoderCNDirectModels: Readonly<Record<string, string>> = Object.freeze(
+  Object.fromEntries(Object.entries(qoderCNFriendlyModels).map(([key, model]) => [model.id, key])),
+)
 
 /**
  * Prettify an upstream display name (`Qwen3.7` → `Qwen 3.7`). The provider
@@ -248,6 +253,18 @@ export function prettifyQoderCNModelName(name: string): string {
     .replace(/DeepSeek\s*V(\d)-/g, 'DeepSeek V$1 ')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+/**
+ * Map a Qoder CN deployment-facing model id to its wire key. Ids this build
+ * does not know — a model released after it — pass through unchanged, so a new
+ * key stays directly addressable without a plugin update.
+ * @param modelID - the deployment-facing id (`deepseek-v4-pro`, `auto`, …).
+ * @returns the wire key the gateway expects.
+ */
+export function getQoderCNDirectModel(modelID?: string): string {
+  const id = modelID?.trim() ?? ''
+  return qoderCNDirectModels[id] ?? qoderCNLegacyModelKeys[id] ?? (id.length === 0 ? 'auto' : id)
 }
 
 /**

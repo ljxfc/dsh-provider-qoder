@@ -28,6 +28,8 @@ import {
 } from './adapter.ts'
 import type { QoderCatalogModel, QoderConnectionOptions } from './adapter.ts'
 import { getMachineId, isQoderPatValue, parseVpcInstanceFromEnvironment, qoderCnEndpoints } from './cosy.ts'
+import { applyUsageRemote } from './usage-remote.ts'
+import type { QoderLang } from './annotate.ts'
 
 export {
   DEFAULT_CONTEXT_WINDOW,
@@ -42,8 +44,28 @@ export { serializeMessages, serializeRequest, systemTextOf } from './serialize.t
 export type { QoderMessage, QoderSerializedRequest } from './serialize.ts'
 export { mapFinishReason, mapUsage } from './translate.ts'
 export { parseQoderSse, parseEnvelope, DONE } from './sse.ts'
-export { buildQoderAuthHeaders, qoderCnEndpoints, getQoderCNDirectModel } from './cosy.ts'
+export {
+  buildQoderAuthHeaders,
+  getQoderCNDirectModel,
+  getQoderCNFriendlyModelInfo,
+  qoderCnEndpoints,
+} from './cosy.ts'
 export { exchangeJobToken, refreshJobToken, fetchUserInfo } from './pat.ts'
+export { fetchQoderQuota, parseQuotaPool, QUOTA_TIMEOUT_MS } from './usage.ts'
+export type { QoderQuotaPool, QoderUsageReport } from './usage.ts'
+export { parseQuotaSnapshot, QUOTA_ENDPOINT } from './usage-wire.ts'
+export type { QuotaPoolWire, QuotaSnapshotWire } from './usage-wire.ts'
+export {
+  compareModelsForSelector,
+  formatContextWindow,
+  formatPriceFactor,
+  localizedText,
+  modelAnnotationParts,
+  modelDescription,
+  modelSelectorLabel,
+  parsePromotion,
+} from './annotate.ts'
+export type { AnnotatableModel, QoderLang, QoderLocalizedText, QoderModelPromotion } from './annotate.ts'
 
 export const name = 'llm-qoder'
 export const inject = ['llm']
@@ -52,6 +74,8 @@ const NS = 'llm-qoder'
 const DEFAULT_API_KEY_ENV = 'QODERCN_PERSONAL_ACCESS_TOKEN'
 /** The single provider route this plugin owns. */
 const PROVIDER = 'qoder-cn'
+/** The label 设置 → 模型 shows for that route. */
+const DISPLAY_NAME = 'Qoder CN'
 
 /**
  * One stored provider profile. The profile fields stay plain because the
@@ -94,6 +118,24 @@ export interface Config {
   models: Volatile<QoderCatalogModel[] | undefined>
   streamIdleTimeoutMs: Volatile<number>
   retryPolicy: Volatile<RetryPolicyConfig | undefined>
+  /**
+   * Whether the Web sidebar shows the plans & quota card
+   * (`sidebar.footer.action`). Defaults to false, so an unset document mounts
+   * no sidebar quota surface and starts no background usage poll for it; the
+   * `main`-slot panel behind it stays registered. Read by the browser client;
+   * the adapter ignores it.
+   */
+  showSidebarQuota: Volatile<boolean>
+  /**
+   * Hand-maintained `{ modelId: planTierName }` map feeding the model
+   * selector's minimum-plan annotation, plus `annotationLanguage`'s sibling
+   * for the annotation copy. Qoder CN reports no per-model tier anywhere, so
+   * this map — not a hard-coded guess — is the only truthful source for that
+   * one label and an unmapped model simply carries none.
+   */
+  modelPlans: Volatile<Record<string, string>>
+  /** Annotation language for the picker's generated description (`zh` | `en`). */
+  annotationLanguage: Volatile<QoderLang | undefined>
   /** User-added `qoder-cn` profile; absence keeps the route in Add provider. */
   providers: Volatile<Record<string, QoderProviderProfile>>
 }
@@ -101,6 +143,10 @@ export interface Config {
 /** Plain form accepted by the resolver and by tests outside a Loader runtime. */
 export interface QoderConfigValues extends QoderProviderProfile {
   providers?: Record<string, QoderProviderProfile>
+  /** `{ modelId: planTierName }` feeding the selector's plan annotation. */
+  modelPlans?: Record<string, string>
+  /** Annotation copy language (`zh` | `en`). */
+  annotationLanguage?: QoderLang
 }
 
 const catalogModel: z<QoderCatalogModel> = z.object({
@@ -124,6 +170,10 @@ const connectionFields = {
   models: z.array(catalogModel).default(undefined as never),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   retryPolicy: RetryPolicySchema,
+  // Qoder CN reports no per-model plan tier, so the selector's plan label is a
+  // hand-maintained map; an unmapped model carries no label rather than a guess.
+  modelPlans: z.dict(z.string()).default({}),
+  annotationLanguage: z.union(['zh', 'en']),
 }
 
 /** Root fields are individually editable in the generic settings form. */
@@ -139,6 +189,9 @@ const volatileConnectionFields = {
   models: z.array(catalogModel).default(undefined as never).volatile(),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS).volatile(),
   retryPolicy: RetryPolicySchema.volatile(),
+  showSidebarQuota: z.boolean().default(false).volatile(),
+  modelPlans: z.dict(z.string()).default({}).volatile(),
+  annotationLanguage: z.union(['zh', 'en']).volatile(),
 }
 
 export const Config: z<Config> = z.object({
@@ -210,6 +263,8 @@ function plainConfig(config: Config | QoderConfigValues): QoderConfigValues {
     models: readConfigValue(config.models),
     streamIdleTimeoutMs: readConfigValue(config.streamIdleTimeoutMs),
     retryPolicy: readConfigValue(config.retryPolicy),
+    modelPlans: readConfigValue(config.modelPlans),
+    annotationLanguage: readConfigValue(config.annotationLanguage),
     providers: readConfigValue(config.providers),
   }
 }
@@ -268,6 +323,8 @@ export function resolveAdapterOptions(
     streamIdleTimeoutMs,
     retryPolicy: resolveRetryPolicy(values.retryPolicy, 'llm-qoder: retryPolicy'),
     machineId: getMachineId(dshHomePath()),
+    annotationLanguage: values.annotationLanguage,
+    annotationPlans: values.modelPlans,
   }
 }
 
@@ -297,6 +354,7 @@ export function apply(ctx: Context, config: Config): void {
 
   // dsh-v0.1.7 exposes Qoder's provider editor through Models. Do not also
   // generate a generic Settings page for the same entry.
+  ctx.logger.info(`llm-qoder: apply() reached the settings handshake (provider route "${PROVIDER}")`)
   ctx.inject(['settings'], (child) => {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
@@ -338,11 +396,36 @@ export function apply(ctx: Context, config: Config): void {
     resolveApiKey,
     resolveAttachments: () => ctx.get('attachments'),
   })
+  // The sidebar quota card reads its facts over the Typert Gateway, because the
+  // browser never holds the PAT. A profile without a Typert registry (a headless
+  // client) simply never activates this fiber.
+  applyUsageRemote(ctx, { adapter })
   const settingsNs = ctx.fiber.entry?.options.id ?? NS
-  ctx.llm.registerConfigurableProviders([
-    { provider: PROVIDER, displayName: PROVIDER, settingsNs, settingsPath: ['providers', PROVIDER] },
-  ])
+  // Registration in the llm registry is all-or-nothing, and a refused entry
+  // costs the whole Models row, so name the step that failed instead of
+  // leaving a plugin that looks loaded but declares nothing.
+  try {
+    // The Models page renders a provider row only when the row is *configured*,
+    // and a row with a non-empty settingsPath counts as configured only once the
+    // settings document actually holds that path:
+    //
+    //   configured = namespace exists && (settingsPath is empty || path resolves)
+    //
+    // Qoder's route is built in, like the two DeepSeek routes, so it declares no
+    // settings path: the namespace itself is the route profile, which is what keeps
+    // the row in 设置 → 模型 from the first launch. The `providers.<route>` map stays
+    // supported for hand-written multi-route configs.
+    ctx.llm.registerConfigurableProviders([
+      { provider: PROVIDER, displayName: DISPLAY_NAME, settingsNs, settingsPath: [] },
+    ])
+  } catch (error) {
+    ctx.logger.error(`llm-qoder: the provider directory refused route "${PROVIDER}" (ns "${settingsNs}")`)
+    ctx.logger.error(error)
+    throw error
+  }
+  ctx.logger.info(`llm-qoder: declared route "${PROVIDER}" through settings namespace "${settingsNs}"`)
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
+  ctx.logger.info(`llm-qoder: adapter registered for route "${PROVIDER}"`)
   let registeredPolicy = options().retryPolicy
   const ensureRegistrationFacts = (): void => {
     const policy = options().retryPolicy

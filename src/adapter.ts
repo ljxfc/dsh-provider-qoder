@@ -33,9 +33,12 @@ import {
 } from './cosy.ts'
 import { qoderEncodeBody } from './qoder-encoding.ts'
 import { exchangeJobToken, fetchUserInfo, refreshJobToken, type QoderJobTokenSession } from './pat.ts'
+import { fetchQoderQuota, type QoderUsageReport } from './usage.ts'
 import { serializeMessages, systemTextOf, transformTools, lastUserText } from './serialize.ts'
 import { parseQoderSse, DONE, parseEnvelope } from './sse.ts'
 import { translate } from './translate.ts'
+import { compareModelsForSelector, modelDescription, modelSelectorLabel, parsePromotion } from './annotate.ts'
+import type { QoderLang, QoderModelPromotion } from './annotate.ts'
 
 /** One catalog model entry advertised by the adapter. */
 export interface QoderCatalogModel {
@@ -53,6 +56,12 @@ export interface QoderCatalogModel {
   inputModalities?: ('text' | 'image')[]
   /** Whether the wire model is a reasoning model (thinking enabled). */
   reasoning?: boolean
+  /** Whether the model costs no credits at all. */
+  free?: boolean
+  /** Relative credit cost per token, as advertised by the server. */
+  priceFactor?: number
+  /** Active time-windowed discount advertised by the server. */
+  promotion?: QoderModelPromotion
 }
 
 /** Validated connection facts for one operation. */
@@ -73,6 +82,18 @@ export interface QoderConnectionOptions {
   retryPolicy: ResolvedRetryPolicy
   /** Machine id shared with the qodercli/pi installs, generated once under the harness home. */
   machineId: string
+  /**
+   * Display language for the generated model-selector annotations. Qoder
+   * localizes its own promotion badges, so the picker's detail line follows
+   * whichever language the connection asks for.
+   */
+  annotationLanguage?: QoderLang
+  /**
+   * Optional `{ modelId: planTierName }` map for the selector's minimum-plan
+   * annotation. Qoder CN decides model availability server-side and reports no
+   * per-model tier, so the label is operator-supplied rather than guessed.
+   */
+  annotationPlans?: Record<string, string>
 }
 
 /** Constructor options for {@link QoderAdapter}. */
@@ -94,6 +115,8 @@ export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 /** Default per-request output-token cap. */
 export const DEFAULT_MAX_TOKENS = 32_768
+/** Selector-annotation language used when a connection does not choose one. */
+export const DEFAULT_ANNOTATION_LANGUAGE: QoderLang = 'zh'
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 const OFF_REASONING_EFFORT = ReasoningEffortId('off')
@@ -126,6 +149,10 @@ function positiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
     ? value
     : undefined
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 }
 
 function contextWindowOf(entry: Record<string, unknown>): number | undefined {
@@ -168,6 +195,8 @@ export function parseQoderModelCatalog(value: unknown): QoderCatalogModel[] {
     seen.add(identity.id)
     const contextWindow = contextWindowOf(entry)
     const maxTokens = positiveInteger(entry.max_output_tokens)
+    const promotion = parsePromotion(entry.promotion)
+    const priceFactor = positiveNumber(entry.price_factor)
     models.push({
       id: identity.id,
       name: identity.name,
@@ -175,6 +204,9 @@ export function parseQoderModelCatalog(value: unknown): QoderCatalogModel[] {
       ...(maxTokens === undefined ? {} : { maxTokens }),
       inputModalities: entry.is_vl === true ? ['text', 'image'] : ['text'],
       reasoning: entry.is_reasoning === true || recordOf(entry.thinking_config) !== undefined,
+      ...(entry.is_free === true ? { free: true } : {}),
+      ...(priceFactor === undefined ? {} : { priceFactor }),
+      ...(promotion === undefined ? {} : { promotion }),
     })
   }
   if (models.length === 0) {
@@ -201,12 +233,25 @@ export function httpErrorCode(status: number, detail: string): string {
   return `HTTP_${status}`
 }
 
-function modelInfo(provider: string, model: QoderCatalogModel): LlmModelInfo {
+function modelInfo(
+  provider: string,
+  model: QoderCatalogModel,
+  lang: QoderLang = DEFAULT_ANNOTATION_LANGUAGE,
+  plans?: Record<string, string>,
+): LlmModelInfo {
+  // The minimum-plan label is the one annotation Qoder's API does not report,
+  // so it comes from the operator's map; an unmapped model carries none.
+  const plan = plans?.[model.id]
+  const annotated = plan === undefined || plan.length === 0 ? model : { ...model, plan }
+  const description = modelDescription(annotated, lang)
   return {
     provider,
     id: model.id,
-    name: model.name ?? model.id,
-    ...model.description === undefined ? {} : { description: model.description },
+    // The 0.2.0 selector renders model names only, so the annotations ride the
+    // name — that is the only channel the picker displays. `description` still
+    // carries the same text for any surface that does render it.
+    name: modelSelectorLabel(annotated, lang),
+    ...description === undefined ? {} : { description },
     ...model.inputModalities === undefined ? {} : { inputModalities: model.inputModalities },
   }
 }
@@ -230,8 +275,13 @@ export class QoderAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const models = await this.catalogModels(this.config.options(), true)
-    return models.map(model => modelInfo(provider, model))
+    const connection = this.config.options()
+    const models = await this.catalogModels(connection, true)
+    const lang = connection.annotationLanguage ?? DEFAULT_ANNOTATION_LANGUAGE
+    // Free models cost no credits and are usable by every account, so they are
+    // hoisted to the top of the picker instead of hiding among the paid ones.
+    return [...models].sort(compareModelsForSelector)
+      .map(model => modelInfo(provider, model, lang, connection.annotationPlans))
   }
 
   override async resolveModel(
@@ -247,7 +297,12 @@ export class QoderAdapter extends LlmAdapter {
     return {
       ...configured === undefined
         ? { provider, id: model, name: model, inputModalities: ['text' as const] }
-        : modelInfo(provider, configured),
+        : modelInfo(
+          provider,
+          configured,
+          connection.annotationLanguage ?? DEFAULT_ANNOTATION_LANGUAGE,
+          connection.annotationPlans,
+        ),
       context: { contextWindow },
       defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
       ...reasoning
@@ -414,6 +469,22 @@ export class QoderAdapter extends LlmAdapter {
         }
       }
     }
+  }
+
+  /**
+   * Read the account's plan and quota. Reuses the cached job token so a panel
+   * refresh never re-runs the PAT exchange, and reads with a plain bearer —
+   * the `/api/v2/...` routes need no COSY signing.
+   */
+  async getUsage(signal?: AbortSignal): Promise<QoderUsageReport> {
+    const connection = this.config.options()
+    const rawPat = await this.config.resolveApiKey(connection)
+    const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal)
+    return fetchQoderQuota(
+      jobToken,
+      { gateway: connection.endpoints.gateway, openapi: connection.endpoints.openapi },
+      signal,
+    )
   }
 
   private async * request(

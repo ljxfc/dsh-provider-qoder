@@ -118,37 +118,44 @@ function qoderChatUrl(endpoints) {
 function qoderModelListUrl(endpoints) {
   return `${endpoints.gateway}/algo/api/v2/model/list?Encode=1`;
 }
-function getQoderCNDirectModel(modelID) {
-  return {
-    "qoder-cn": "auto",
-    "qwen3.7-max": "qmodel_latest",
-    "qwen3.7-plus": "qmodel",
-    "qwen3.6-plus": "qmodel",
-    "qwen3.6-flash": "q36fmodel",
-    "deepseek-v4-pro": "dmodel",
-    "deepseek-v4-flash": "dfmodel",
-    "glm-5.2": "gm51model",
-    "glm-5.1": "gm51model",
-    "kimi-k2.6": "kmodel",
-    "minimax-m2.7": "mmodel",
-    "minimax-m3": "mmodel"
-  }[modelID || ""] || modelID || "auto";
-}
 var qoderCNFriendlyModels = {
   auto: { id: "auto", name: "Auto" },
-  "qoder-cn": { id: "qoder-cn", name: "Auto" },
+  qmodel_38max: { id: "qwen3.8-max", name: "Qwen 3.8 Max" },
+  qfmodel: { id: "qwen3.8-flash", name: "Qwen 3.8 Flash" },
   qmodel_latest: { id: "qwen3.7-max", name: "Qwen 3.7 Max" },
   qmodel: { id: "qwen3.7-plus", name: "Qwen 3.7 Plus" },
-  q36fmodel: { id: "qwen3.6-flash", name: "Qwen 3.6 Flash" },
-  qfmodel: { id: "qwen3.6-flash", name: "Qwen 3.6 Flash" },
+  q37fmodel: { id: "qwen3.7-flash", name: "Qwen 3.7 Flash" },
   dmodel: { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
   dfmodel: { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+  gmodel: { id: "glm-5.3", name: "GLM 5.3" },
+  gfmodel: { id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
   gm51model: { id: "glm-5.2", name: "GLM 5.2" },
-  kmodel: { id: "kimi-k2.6", name: "Kimi K2.6" },
-  mmodel: { id: "minimax-m2.7", name: "MiniMax M2.7" }
+  kmodel_latest: { id: "kimi-k3", name: "Kimi K3" },
+  kmodel: { id: "kimi-k2.8-preview", name: "Kimi K2.8 Preview" },
+  mmodel: { id: "minimax-m2.7", name: "MiniMax M2.7" },
+  // Retired from the live catalog but still accepted by the gateway, so a
+  // session saved against it keeps its id AND its label instead of degrading to
+  // a prettified wire key.
+  q36fmodel: { id: "qwen3.6-flash", name: "Qwen 3.6 Flash" }
 };
+var qoderCNLegacyModelKeys = {
+  "qoder-cn": "auto",
+  "qwen3.6-max": "qmodel_latest",
+  "qwen3.6-plus": "qmodel",
+  "qwen3.6-flash": "q36fmodel",
+  "glm-5.1": "gm51model",
+  "kimi-k2.6": "kmodel",
+  "minimax-m3": "mmodel"
+};
+var qoderCNDirectModels = Object.freeze(
+  Object.fromEntries(Object.entries(qoderCNFriendlyModels).map(([key, model]) => [model.id, key]))
+);
 function prettifyQoderCNModelName(name2) {
   return (name2 || "Model").replace(/\s*·\s*Qoder CN\s*$/i, "").replace(/Qwen(\d)/g, "Qwen $1").replace(/Qwen([\d.]+)-/g, "Qwen $1 ").replace(/DeepSeek\s*V(\d)-/g, "DeepSeek V$1 ").replace(/\s+/g, " ").trim();
+}
+function getQoderCNDirectModel(modelID) {
+  const id = modelID?.trim() ?? "";
+  return qoderCNDirectModels[id] ?? qoderCNLegacyModelKeys[id] ?? (id.length === 0 ? "auto" : id);
 }
 function getQoderCNFriendlyModelInfo(key, display) {
   return qoderCNFriendlyModels[key] ?? {
@@ -388,6 +395,166 @@ async function fetchUserInfo(jobToken, endpoints, signal) {
     if (signal?.aborted) throw error;
   }
   return { userID, email, name: name2 };
+}
+
+// src/usage.ts
+var QUOTA_TIMEOUT_MS = 2e4;
+function asRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function num(value, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+function str(value, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+function bool(value, fallback = false) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function fraction(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return void 0;
+  return value > 1 ? value / 100 : value;
+}
+function parseQuotaPool(value) {
+  const source = asRecord(value);
+  if (source === void 0) return void 0;
+  const raw = num(source.percentage);
+  return {
+    total: num(source.total),
+    used: num(source.used),
+    remaining: num(source.remaining),
+    percentage: raw > 1 ? raw / 100 : raw,
+    unit: str(source.unit, "credits"),
+    // Absent means "no such posture reported" and reads as spendable, so an
+    // older gateway that omits the flag still renders the pool.
+    available: bool(source.available, true)
+  };
+}
+function parsePlan(payload) {
+  const root = asRecord(payload);
+  if (root === void 0) return {};
+  const organization = asRecord(root.organization);
+  const report = {
+    userType: str(root.user_type),
+    planTierName: str(root.plan_tier_name),
+    isPaidPlan: bool(root.is_paid_plan),
+    isHighestTier: bool(root.is_highest_tier),
+    periodStart: num(root.start_date),
+    periodEnd: num(root.end_date)
+  };
+  if (organization !== void 0) {
+    report.organization = {
+      id: str(organization.org_id),
+      name: str(organization.org_name),
+      role: str(organization.role_name),
+      suspended: bool(organization.is_suspended)
+    };
+  }
+  return report;
+}
+function parseUsage(payload) {
+  const root = asRecord(payload);
+  if (root === void 0) return {};
+  const personal = parseQuotaPool(root.userQuota);
+  const pool = parseQuotaPool(root.orgResourcePackage);
+  const addOn = parseQuotaPool(root.addOnQuota);
+  const report = {
+    usageType: str(root.usageType, "credits"),
+    isQuotaExceeded: bool(root.isQuotaExceeded),
+    expiresAt: num(root.expiresAt)
+  };
+  const total = fraction(root.totalUsagePercentage);
+  if (total !== void 0) report.totalPercentage = total;
+  if (personal !== void 0) report.personal = personal;
+  if (pool !== void 0) report.organizationPool = pool;
+  if (addOn !== void 0) report.addOnPool = addOn;
+  const upgradeUrl = root.upgradeUrl;
+  if (typeof upgradeUrl === "string" && upgradeUrl.length > 0) report.upgradeUrl = upgradeUrl;
+  return report;
+}
+function parseOpenApiUsage(payload) {
+  const root = asRecord(payload);
+  if (root === void 0) return {};
+  const report = {};
+  const userType = str(root.user_type);
+  if (userType.length > 0) report.userType = userType;
+  const planTierName = str(root.plan_tier_name);
+  if (planTierName.length > 0) report.planTierName = planTierName;
+  if (typeof root.is_highest_tier === "boolean") report.isHighestTier = root.is_highest_tier;
+  if (typeof root.expires_at === "number") report.expiresAt = root.expires_at;
+  const total = fraction(root.total_usage_percentage);
+  if (total !== void 0) report.totalPercentage = total;
+  if (typeof root.is_quota_exceeded === "boolean") report.isQuotaExceeded = root.is_quota_exceeded;
+  const personal = parseQuotaPool(root.user_quota);
+  if (personal !== void 0) report.personal = personal;
+  const shared = parseQuotaPool(root.shared_quota);
+  if (shared !== void 0) report.organizationPool = shared;
+  const addOn = parseQuotaPool(root.add_on_quota ?? root.addOnQuota);
+  if (addOn !== void 0) report.addOnPool = addOn;
+  const upgradeUrl = root.upgrade_url;
+  if (typeof upgradeUrl === "string" && upgradeUrl.length > 0) report.upgradeUrl = upgradeUrl;
+  return report;
+}
+async function getJson(url, jobToken, signal) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), QUOTA_TIMEOUT_MS);
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${jobToken}`,
+        Accept: "application/json",
+        // The desktop injects HTTP_PROXY, and the proxy can answer without the
+        // content-encoding header — an identity body is the only reliably
+        // decodable form (same reason the model catalog asks for identity).
+        "Accept-Encoding": "identity"
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      throw new Error(`Qoder CN quota request to ${url} failed with HTTP ${response.status}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+function emptyPool() {
+  return { total: 0, used: 0, remaining: 0, percentage: 0, unit: "credits", available: true };
+}
+async function fetchQoderQuota(jobToken, endpoints, signal) {
+  const gateway = endpoints.gateway.replace(/\/+$/, "");
+  const openapi = (endpoints.openapi ?? endpoints.gateway).replace(/\/+$/, "");
+  const [plan, usage, account] = await Promise.allSettled([
+    getJson(`${gateway}/api/v2/user/plan`, jobToken, signal),
+    getJson(`${gateway}/api/v2/quota/usage`, jobToken, signal),
+    getJson(`${openapi}/api/v1/me/usage`, jobToken, signal)
+  ]);
+  if (plan.status === "rejected" && usage.status === "rejected" && account.status === "rejected") {
+    throw plan.reason instanceof Error ? plan.reason : new Error(String(plan.reason));
+  }
+  const base = {
+    userType: "",
+    planTierName: "",
+    isPaidPlan: false,
+    isHighestTier: false,
+    periodStart: 0,
+    periodEnd: 0,
+    personal: emptyPool(),
+    usageType: "credits",
+    totalPercentage: 0,
+    isQuotaExceeded: false,
+    expiresAt: 0
+  };
+  return {
+    ...base,
+    ...account.status === "fulfilled" ? parseOpenApiUsage(account.value) : {},
+    ...plan.status === "fulfilled" ? parsePlan(plan.value) : {},
+    ...usage.status === "fulfilled" ? parseUsage(usage.value) : {}
+  };
 }
 
 // src/serialize.ts
@@ -785,10 +952,108 @@ async function* translate(envelopes, reasoningEnabled = true) {
   throw new LlmError3("Qoder SSE payload stream ended without [DONE]", "STREAM_CLOSED");
 }
 
+// src/annotate.ts
+function recordOf(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function trimmed(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
+}
+function positiveNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : void 0;
+}
+function readLocalized(value) {
+  const record2 = recordOf(value);
+  if (record2 === void 0) return void 0;
+  const zh = trimmed(record2.zh);
+  const en = trimmed(record2.en);
+  return zh === void 0 && en === void 0 ? void 0 : { ...zh === void 0 ? {} : { zh }, ...en === void 0 ? {} : { en } };
+}
+function localizedText(value, lang) {
+  if (value === void 0) return void 0;
+  return lang === "zh" ? value.zh ?? value.en : value.en ?? value.zh;
+}
+function parsePromotion(raw) {
+  const record2 = recordOf(raw);
+  if (record2 === void 0) return void 0;
+  const badge = readLocalized(record2.badge);
+  const description = readLocalized(record2.description);
+  const windowStart = trimmed(record2.window_start);
+  const windowEnd = trimmed(record2.window_end);
+  if (badge === void 0 && (windowStart === void 0 || windowEnd === void 0)) return void 0;
+  return {
+    ...typeof record2.active === "boolean" ? { active: record2.active } : {},
+    badge: badge ?? {},
+    ...description === void 0 ? {} : { description },
+    ...windowStart === void 0 ? {} : { windowStart },
+    ...windowEnd === void 0 ? {} : { windowEnd },
+    ...trimmed(record2.timezone) === void 0 ? {} : { timezone: trimmed(record2.timezone) },
+    ...positiveNumber(record2.discount_factor) === void 0 ? {} : { discountFactor: positiveNumber(record2.discount_factor) }
+  };
+}
+function formatContextWindow(tokens) {
+  if (tokens === void 0 || !Number.isFinite(tokens) || tokens <= 0) return void 0;
+  if (tokens >= 1e6) {
+    const millions = tokens / 1e6;
+    return `${Number.isInteger(millions) ? millions : Number(millions.toFixed(1))}M`;
+  }
+  if (tokens >= 1e3) return `${Math.round(tokens / 1e3)}K`;
+  return String(tokens);
+}
+function promotionWindow(promotion) {
+  if (promotion.windowStart === void 0 || promotion.windowEnd === void 0) return void 0;
+  return `${promotion.windowStart}-${promotion.windowEnd}`;
+}
+function formatPriceFactor(factor) {
+  return String(Number(factor.toFixed(3)));
+}
+function modelAnnotationParts(model, lang) {
+  const parts = [];
+  const plan = trimmed(model.plan);
+  if (plan !== void 0) parts.push(plan);
+  const priceFactor = model.priceFactor;
+  if (priceFactor !== void 0 && Number.isFinite(priceFactor) && priceFactor > 0) {
+    parts.push(`${formatPriceFactor(priceFactor)}\xD7${lang === "zh" ? "\u79EF\u5206" : " credits"}`);
+  }
+  if (model.free === true) parts.push("FREE");
+  const promotion = model.promotion;
+  if (promotion !== void 0) {
+    const badge = localizedText(promotion.badge, lang) ?? (promotion.discountFactor === void 0 ? void 0 : lang === "zh" ? "\u9519\u5CF0" : "Off-peak");
+    const window = promotionWindow(promotion);
+    const label = badge === void 0 ? window : window === void 0 ? badge : `${badge}(${window})`;
+    if (label !== void 0) {
+      parts.push(promotion.active === false ? `${label} ${lang === "zh" ? "\u672A\u751F\u6548" : "not in effect"}` : label);
+    }
+  }
+  if (model.inputModalities?.includes("image") === true) parts.push(lang === "zh" ? "\u56FE\u50CF" : "Image");
+  const context = formatContextWindow(model.contextWindow);
+  if (context !== void 0) parts.push(context);
+  return parts;
+}
+function modelDescription(model, lang) {
+  const explicit = trimmed(model.description);
+  if (explicit !== void 0) return explicit;
+  const parts = modelAnnotationParts(model, lang);
+  return parts.length === 0 ? void 0 : parts.join(" \xB7 ");
+}
+function modelSelectorLabel(model, lang) {
+  const base = trimmed(model.name) ?? model.id;
+  const parts = modelAnnotationParts(model, lang);
+  return parts.length === 0 ? base : `${base} \xB7 ${parts.join(" \xB7 ")}`;
+}
+function compareModelsForSelector(a, b) {
+  const freeDelta = Number(b.free === true) - Number(a.free === true);
+  if (freeDelta !== 0) return freeDelta;
+  const nameDelta = (a.name ?? a.id).localeCompare(b.name ?? b.id);
+  if (nameDelta !== 0) return nameDelta;
+  return a.id.localeCompare(b.id);
+}
+
 // src/adapter.ts
 var DEFAULT_STREAM_IDLE_TIMEOUT_MS = 3e5;
 var DEFAULT_CONTEXT_WINDOW = 1e6;
 var DEFAULT_MAX_TOKENS = 32768;
+var DEFAULT_ANNOTATION_LANGUAGE = "zh";
 var STREAM_IDLE_TIMEOUT_CODE = "LLM_STREAM_IDLE_TIMEOUT";
 var OFF_REASONING_EFFORT = ReasoningEffortId("off");
 var HIGH_REASONING_EFFORT = ReasoningEffortId("high");
@@ -804,18 +1069,21 @@ var modelCatalogCache = /* @__PURE__ */ new Map();
 function hashCredential(value) {
   return crypto2.createHash("sha256").update(value).digest("hex");
 }
-function recordOf(value) {
+function recordOf2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function positiveInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : void 0;
 }
+function positiveNumber2(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : void 0;
+}
 function contextWindowOf(entry) {
-  const contexts = recordOf(entry.context_config);
+  const contexts = recordOf2(entry.context_config);
   let listed;
   if (contexts !== void 0) {
     for (const value of Object.values(contexts)) {
-      const context = recordOf(value);
+      const context = recordOf2(value);
       const tokenCount = positiveInteger(context?.token_count);
       if (tokenCount === void 0) continue;
       if (context?.is_default === true) return tokenCount;
@@ -825,14 +1093,14 @@ function contextWindowOf(entry) {
   return positiveInteger(entry.max_input_tokens) ?? listed;
 }
 function parseQoderModelCatalog(value) {
-  const root = recordOf(value);
+  const root = recordOf2(value);
   if (!Array.isArray(root?.chat)) {
     throw new LlmError4('Qoder CN model listing has no "chat" array', "DISCOVERY_FAILED");
   }
   const seen = /* @__PURE__ */ new Set();
   const models = [];
   for (const value2 of root.chat) {
-    const entry = recordOf(value2);
+    const entry = recordOf2(value2);
     const key = typeof entry?.key === "string" ? entry.key.trim() : "";
     if (key.length === 0 || entry?.enable !== true) continue;
     const display = typeof entry.display_name === "string" && entry.display_name.trim().length > 0 ? entry.display_name.trim() : key;
@@ -841,13 +1109,18 @@ function parseQoderModelCatalog(value) {
     seen.add(identity.id);
     const contextWindow = contextWindowOf(entry);
     const maxTokens = positiveInteger(entry.max_output_tokens);
+    const promotion = parsePromotion(entry.promotion);
+    const priceFactor = positiveNumber2(entry.price_factor);
     models.push({
       id: identity.id,
       name: identity.name,
       ...contextWindow === void 0 ? {} : { contextWindow },
       ...maxTokens === void 0 ? {} : { maxTokens },
       inputModalities: entry.is_vl === true ? ["text", "image"] : ["text"],
-      reasoning: entry.is_reasoning === true || recordOf(entry.thinking_config) !== void 0
+      reasoning: entry.is_reasoning === true || recordOf2(entry.thinking_config) !== void 0,
+      ...entry.is_free === true ? { free: true } : {},
+      ...priceFactor === void 0 ? {} : { priceFactor },
+      ...promotion === void 0 ? {} : { promotion }
     });
   }
   if (models.length === 0) {
@@ -866,12 +1139,18 @@ function httpErrorCode(status, detail) {
   if (status >= 500) return "SERVER";
   return `HTTP_${status}`;
 }
-function modelInfo(provider, model) {
+function modelInfo(provider, model, lang = DEFAULT_ANNOTATION_LANGUAGE, plans) {
+  const plan = plans?.[model.id];
+  const annotated = plan === void 0 || plan.length === 0 ? model : { ...model, plan };
+  const description = modelDescription(annotated, lang);
   return {
     provider,
     id: model.id,
-    name: model.name ?? model.id,
-    ...model.description === void 0 ? {} : { description: model.description },
+    // The 0.2.0 selector renders model names only, so the annotations ride the
+    // name — that is the only channel the picker displays. `description` still
+    // carries the same text for any surface that does render it.
+    name: modelSelectorLabel(annotated, lang),
+    ...description === void 0 ? {} : { description },
     ...model.inputModalities === void 0 ? {} : { inputModalities: model.inputModalities }
   };
 }
@@ -888,8 +1167,10 @@ var QoderAdapter = class extends LlmAdapter {
     return this.config.options().retryPolicy;
   }
   async listModels(provider) {
-    const models = await this.catalogModels(this.config.options(), true);
-    return models.map((model) => modelInfo(provider, model));
+    const connection = this.config.options();
+    const models = await this.catalogModels(connection, true);
+    const lang = connection.annotationLanguage ?? DEFAULT_ANNOTATION_LANGUAGE;
+    return [...models].sort(compareModelsForSelector).map((model) => modelInfo(provider, model, lang, connection.annotationPlans));
   }
   async resolveModel(provider, model, signal) {
     const connection = this.config.options();
@@ -898,7 +1179,12 @@ var QoderAdapter = class extends LlmAdapter {
     const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow;
     const reasoning = configured?.reasoning === true;
     return {
-      ...configured === void 0 ? { provider, id: model, name: model, inputModalities: ["text"] } : modelInfo(provider, configured),
+      ...configured === void 0 ? { provider, id: model, name: model, inputModalities: ["text"] } : modelInfo(
+        provider,
+        configured,
+        connection.annotationLanguage ?? DEFAULT_ANNOTATION_LANGUAGE,
+        connection.annotationPlans
+      ),
       context: { contextWindow },
       defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
       ...reasoning ? {
@@ -1054,6 +1340,21 @@ var QoderAdapter = class extends LlmAdapter {
     } finally {
       __callDispose(_stack, _error, _hasError);
     }
+  }
+  /**
+   * Read the account's plan and quota. Reuses the cached job token so a panel
+   * refresh never re-runs the PAT exchange, and reads with a plain bearer —
+   * the `/api/v2/...` routes need no COSY signing.
+   */
+  async getUsage(signal) {
+    const connection = this.config.options();
+    const rawPat = await this.config.resolveApiKey(connection);
+    const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal);
+    return fetchQoderQuota(
+      jobToken,
+      { gateway: connection.endpoints.gateway, openapi: connection.endpoints.openapi },
+      signal
+    );
   }
   async *request(options, signal, connection, rawPat, onComment) {
     const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal);
@@ -1272,12 +1573,145 @@ async function* mapEnvelopes(payloads, onComment) {
   }
 }
 
+// src/usage-remote.ts
+import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+
+// src/usage-wire.ts
+var REMOTE_PACKAGE = "dsh-provider-qoder";
+var REMOTE_SERVICE = "qoderUsage";
+var REMOTE_NAMESPACE = "qoder";
+var QUOTA_ENDPOINT = "qoder/quota";
+function reject(field) {
+  throw new TypeError(`qoder/quota result: invalid ${field}`);
+}
+function record(value, field) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : reject(field);
+}
+function stringField(source, key) {
+  const value = source[key];
+  return typeof value === "string" ? value : reject(key);
+}
+function numberField(source, key) {
+  const value = source[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : reject(key);
+}
+function booleanField(source, key) {
+  const value = source[key];
+  return typeof value === "boolean" ? value : reject(key);
+}
+function parsePool(value, field) {
+  const source = record(value, field);
+  return {
+    total: numberField(source, "total"),
+    used: numberField(source, "used"),
+    remaining: numberField(source, "remaining"),
+    percentage: numberField(source, "percentage"),
+    unit: stringField(source, "unit"),
+    available: booleanField(source, "available")
+  };
+}
+function parseQuotaSnapshot(value) {
+  const source = record(value, "result");
+  const snapshot = {
+    planTierName: stringField(source, "planTierName"),
+    userType: stringField(source, "userType"),
+    isPaidPlan: booleanField(source, "isPaidPlan"),
+    isHighestTier: booleanField(source, "isHighestTier"),
+    organizationName: stringField(source, "organizationName"),
+    organizationRole: stringField(source, "organizationRole"),
+    periodStart: numberField(source, "periodStart"),
+    periodEnd: numberField(source, "periodEnd"),
+    personal: parsePool(source.personal, "personal"),
+    usageType: stringField(source, "usageType"),
+    totalPercentage: numberField(source, "totalPercentage"),
+    isQuotaExceeded: booleanField(source, "isQuotaExceeded"),
+    expiresAt: numberField(source, "expiresAt")
+  };
+  if (source.organizationPool !== void 0) {
+    snapshot.organizationPool = parsePool(source.organizationPool, "organizationPool");
+  }
+  if (source.addOnPool !== void 0) {
+    snapshot.addOnPool = parsePool(source.addOnPool, "addOnPool");
+  }
+  if (source.upgradeUrl !== void 0) {
+    snapshot.upgradeUrl = stringField(source, "upgradeUrl");
+  }
+  return snapshot;
+}
+var quotaSchema = { parse: parseQuotaSnapshot };
+var QUOTA_DESCRIPTOR = {
+  id: `${REMOTE_PACKAGE}#${QUOTA_ENDPOINT}`,
+  service: REMOTE_SERVICE,
+  namespace: REMOTE_NAMESPACE,
+  method: "quota",
+  invocation: { kind: "direct" },
+  parameters: [],
+  result: { mode: "strict", typeSymbol: `${REMOTE_PACKAGE}#QuotaSnapshotWire`, create: () => quotaSchema }
+};
+var QUOTA_HOST_CONTRIBUTION = {
+  package: REMOTE_PACKAGE,
+  face: "host",
+  schemas: [],
+  // Every Host contribution must carry its reflection model. This hand-written
+  // Remote has no generated reflection exports, so use the official empty-model
+  // form rather than leaving registry inspection with `model: undefined`.
+  model: { services: [], events: [], objects: [] },
+  invocations: [QUOTA_DESCRIPTOR]
+};
+
+// src/usage-remote.ts
+function toQuotaSnapshot(report) {
+  const snapshot = {
+    planTierName: report.planTierName,
+    userType: report.userType,
+    isPaidPlan: report.isPaidPlan,
+    isHighestTier: report.isHighestTier,
+    organizationName: report.organization?.name ?? "",
+    organizationRole: report.organization?.role ?? "",
+    periodStart: report.periodStart,
+    periodEnd: report.periodEnd,
+    personal: report.personal,
+    usageType: report.usageType,
+    totalPercentage: report.totalPercentage,
+    isQuotaExceeded: report.isQuotaExceeded,
+    expiresAt: report.expiresAt
+  };
+  if (report.organizationPool !== void 0) snapshot.organizationPool = report.organizationPool;
+  if (report.addOnPool !== void 0) snapshot.addOnPool = report.addOnPool;
+  if (report.upgradeUrl !== void 0) snapshot.upgradeUrl = report.upgradeUrl;
+  return snapshot;
+}
+var QoderUsageService = class extends TypertRemoteService {
+  constructor(ctx, deps) {
+    super(ctx, REMOTE_SERVICE, { namespace: REMOTE_NAMESPACE });
+    this.deps = deps;
+  }
+  deps;
+  /**
+   * The account's plan, billing window, and credit pools. Throws when the PAT
+   * cannot be resolved or Qoder is unreachable, which the Gateway folds into
+   * the failure branch the panel renders as a hint.
+   */
+  async quota() {
+    return toQuotaSnapshot(await this.deps.adapter.getUsage());
+  }
+};
+function applyUsageRemote(ctx, deps) {
+  ctx.inject(["typert"], (remoteCtx) => {
+    new QoderUsageService(remoteCtx, deps);
+    const registry = remoteCtx.typert;
+    const unregister = registry.register(QUOTA_HOST_CONTRIBUTION);
+    remoteCtx.effect(() => () => void unregister(), "dsh-provider-qoder: usage remote");
+  });
+}
+
 // src/index.ts
 var name = "llm-qoder";
 var inject = ["llm"];
 var NS = "llm-qoder";
 var DEFAULT_API_KEY_ENV = "QODERCN_PERSONAL_ACCESS_TOKEN";
 var PROVIDER = "qoder-cn";
+var DISPLAY_NAME = "Qoder CN";
 var catalogModel = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -1297,7 +1731,11 @@ var connectionFields = {
   // Schemastery arrays otherwise materialize [], which would disable live discovery.
   models: z.array(catalogModel).default(void 0),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
-  retryPolicy: RetryPolicySchema
+  retryPolicy: RetryPolicySchema,
+  // Qoder CN reports no per-model plan tier, so the selector's plan label is a
+  // hand-maintained map; an unmapped model carries no label rather than a guess.
+  modelPlans: z.dict(z.string()).default({}),
+  annotationLanguage: z.union(["zh", "en"])
 };
 var volatileConnectionFields = {
   apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV).volatile(),
@@ -1310,7 +1748,10 @@ var volatileConnectionFields = {
   // discovery remains the default.
   models: z.array(catalogModel).default(void 0).volatile(),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS).volatile(),
-  retryPolicy: RetryPolicySchema.volatile()
+  retryPolicy: RetryPolicySchema.volatile(),
+  showSidebarQuota: z.boolean().default(false).volatile(),
+  modelPlans: z.dict(z.string()).default({}).volatile(),
+  annotationLanguage: z.union(["zh", "en"]).volatile()
 };
 var Config = z.object({
   ...volatileConnectionFields,
@@ -1366,6 +1807,8 @@ function plainConfig(config) {
     models: readConfigValue(config.models),
     streamIdleTimeoutMs: readConfigValue(config.streamIdleTimeoutMs),
     retryPolicy: readConfigValue(config.retryPolicy),
+    modelPlans: readConfigValue(config.modelPlans),
+    annotationLanguage: readConfigValue(config.annotationLanguage),
     providers: readConfigValue(config.providers)
   };
 }
@@ -1403,7 +1846,9 @@ function resolveAdapterOptions(config, environment) {
     models: resolveModels(values.models),
     streamIdleTimeoutMs,
     retryPolicy: resolveRetryPolicy(values.retryPolicy, "llm-qoder: retryPolicy"),
-    machineId: getMachineId(dshHomePath())
+    machineId: getMachineId(dshHomePath()),
+    annotationLanguage: values.annotationLanguage,
+    annotationPlans: values.modelPlans
   };
 }
 function apply(ctx, config) {
@@ -1426,6 +1871,7 @@ function apply(ctx, config) {
     }
   };
   options();
+  ctx.logger.info(`llm-qoder: apply() reached the settings handshake (provider route "${PROVIDER}")`);
   ctx.inject(["settings"], (child) => {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber));
   });
@@ -1458,11 +1904,20 @@ function apply(ctx, config) {
     resolveApiKey,
     resolveAttachments: () => ctx.get("attachments")
   });
+  applyUsageRemote(ctx, { adapter });
   const settingsNs = ctx.fiber.entry?.options.id ?? NS;
-  ctx.llm.registerConfigurableProviders([
-    { provider: PROVIDER, displayName: PROVIDER, settingsNs, settingsPath: ["providers", PROVIDER] }
-  ]);
+  try {
+    ctx.llm.registerConfigurableProviders([
+      { provider: PROVIDER, displayName: DISPLAY_NAME, settingsNs, settingsPath: [] }
+    ]);
+  } catch (error) {
+    ctx.logger.error(`llm-qoder: the provider directory refused route "${PROVIDER}" (ns "${settingsNs}")`);
+    ctx.logger.error(error);
+    throw error;
+  }
+  ctx.logger.info(`llm-qoder: declared route "${PROVIDER}" through settings namespace "${settingsNs}"`);
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter);
+  ctx.logger.info(`llm-qoder: adapter registered for route "${PROVIDER}"`);
   let registeredPolicy = options().retryPolicy;
   const ensureRegistrationFacts = () => {
     const policy = options().retryPolicy;
@@ -1486,19 +1941,33 @@ export {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DONE,
   PUBLIC_GATEWAY_URL,
+  QUOTA_ENDPOINT,
+  QUOTA_TIMEOUT_MS,
   QoderAdapter,
   apply,
   buildQoderAuthHeaders,
+  compareModelsForSelector,
   exchangeJobToken,
+  fetchQoderQuota,
   fetchUserInfo,
+  formatContextWindow,
+  formatPriceFactor,
   getQoderCNDirectModel,
+  getQoderCNFriendlyModelInfo,
   inject,
+  localizedText,
   mapFinishReason,
   mapUsage,
+  modelAnnotationParts,
+  modelDescription,
+  modelSelectorLabel,
   name,
   parseEnvelope,
+  parsePromotion,
   parseQoderModelCatalog,
   parseQoderSse,
+  parseQuotaPool,
+  parseQuotaSnapshot,
   qoderCnEndpoints,
   qoderEncodeBody,
   refreshJobToken,
