@@ -1,5 +1,7 @@
 # dsh-provider-qoder
 
+**English** · [简体中文](README.zh-CN.md)
+
 Qoder CN provider plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). It keeps Qoder's PAT exchange, COSY signing, WAF encoding, SSE transport, and live model catalog. The provider route is `qoder-cn`.
 
 The primary target is DeepSeek Harness Desktop `v0.2.0-rc.2` (`dsh 0.2.0-rc.2`), declared as `engines.dsh: ^0.2.0-rc.2`.
