@@ -11,14 +11,42 @@
  *
  * Both register with `panel.qoder`, which binds the `t` seat here.
  *
+ * Two layout facts drive the markup, both measured against dsh 0.2.0-rc.2:
+ *
+ * - `sidebar.footer.action` hands the entry a `wide` prop naming the sidebar
+ *   form it is rendering into, and in the collapsed rail that prop is `false`.
+ *   The rail is 56px wide with a 35px footer list, so a full-width card there
+ *   overflows its column — it measured 76px wide at x=-10.5, hanging off the
+ *   left edge and wrapping mid-word. The rail branch below renders the ring
+ *   alone, sized to the shell's own 36px rail controls.
+ * - The expanded branch only fits because `../quota-styles.ts` stacks the
+ *   shell's footer list; as a row its occupants cannot shrink.
+ *
+ * Neither surface animates anything but a bar width, and the panel is only
+ * mounted while it is open — the card stays a dozen elements.
+ *
  * @module dsh-provider-qoder/client/panel
  */
 
 import * as React from 'react'
 import { useEffect } from 'react'
-import type { QuotaSnapshotWire, QuotaSpendWire, QuotaSpendWindowWire } from '../usage-wire.ts'
-import { PANEL_TEXT_EN, qoderPanelText, spendWindowLabel, type QoderPanelText } from './copy.ts'
-import type { QuotaController, QuotaSnapshot } from './quota.ts'
+import {
+  daysUntil,
+  formatCredits,
+  formatDay,
+  formatMoment,
+  formatShortDay,
+  formatYearSpan,
+  joinParts,
+  percentOf,
+  ringDashOffset,
+  RING_CIRCUMFERENCE,
+  RING_RADIUS,
+  usedRatio,
+} from '../quota-view.ts'
+import type { QuotaSnapshotWire } from '../usage-wire.ts'
+import { PANEL_TEXT_EN, qoderPanelText, type QoderPanelText } from './copy.ts'
+import { QUOTA_REMOTE_UNMOUNTED_ERROR, type QuotaController, type QuotaSnapshot } from './quota.ts'
 import type { QoderQuotaSettingsFace, QoderQuotaSettingsSnapshot } from './settings.ts'
 
 /** The `main` key the footer card selects and the panel occupies. */
@@ -46,82 +74,98 @@ export interface QoderQuotaSurfaceProps {
   startAutoRefresh?: () => () => void
   open?: () => void
   close?: () => void
+  /**
+   * Which sidebar form this entry is rendering into. `false` is the collapsed
+   * rail, where only the ring fits; anything else (including a shell that does
+   * not send the prop) is the expanded column.
+   */
+  wide?: boolean
 }
 
-/** Everything the board draws, resolved once per render. */
+/** Everything a surface draws, resolved once per render. */
 interface QuotaView {
   t: QoderPanelText
   snapshot: QuotaSnapshot
   report?: QuotaSnapshotWire
 }
 
-function formatCredits(value: number): string {
-  const rounded = Math.round(value * 100) / 100
-  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2)
-}
-
-function formatRatio(ratio: number): string {
-  return `${String(Math.round(Math.max(0, Math.min(1, ratio)) * 100))}%`
-}
-
-function formatMoment(ms: number | undefined, lang: string): string | undefined {
-  if (ms === undefined || !Number.isFinite(ms)) return undefined
-  try {
-    return new Date(ms).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US', {
-      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-    })
-  } catch {
-    return new Date(ms).toISOString()
-  }
-}
-
-/** One thin progress bar with an accessible value. */
-function QuotaBar(props: { ratio: number; label: string }): React.ReactElement {
-  const percent = Math.round(Math.max(0, Math.min(1, props.ratio)) * 100)
+/**
+ * The progress ring. Two circles on one arc: a track at 40% opacity and the
+ * arc itself, rotated a quarter turn so it grows from twelve o'clock. The dash
+ * array is the full circumference, so the offset is a plain percentage of it.
+ */
+function QuotaRing(props: { percent: number; warn: boolean; size: number }): React.ReactElement {
   return (
-    <div
+    <span className="qcp-glyph" aria-hidden="true">
+      <svg viewBox="0 0 20 20" width={props.size} height={props.size} focusable="false">
+        <circle cx={10} cy={10} r={RING_RADIUS} fill="none" stroke="currentColor" strokeWidth={1.5} opacity={0.4} />
+        <circle
+          cx={10}
+          cy={10}
+          r={RING_RADIUS}
+          fill="none"
+          stroke={props.warn ? 'var(--dsw-alias-state-error-primary, #ec1313)' : 'currentColor'}
+          strokeWidth={2.5}
+          strokeLinecap="round"
+          strokeDasharray={RING_CIRCUMFERENCE}
+          strokeDashoffset={ringDashOffset(props.percent)}
+          transform="rotate(-90 10 10)"
+        />
+      </svg>
+    </span>
+  )
+}
+
+/**
+ * One progress bar. Both boxes are spans — the card renders inside a button,
+ * so its markup must stay phrasing content and `display:block` in the
+ * stylesheet is what gives them a box at all.
+ */
+function QuotaBar(props: { percent: number; warn: boolean; large?: boolean; label: string }): React.ReactElement {
+  return (
+    <span
+      className={props.large === true ? 'qcp-barLg' : 'qcp-bar'}
       role="progressbar"
       aria-label={props.label}
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={percent}
-      style={{ height: '6px', borderRadius: '3px', background: 'rgba(127,127,127,0.28)', overflow: 'hidden' }}
+      aria-valuenow={props.percent}
     >
-      <div style={{ width: `${String(percent)}%`, height: '100%', background: percent >= 100 ? '#d9534f' : 'currentColor' }} />
-    </div>
+      <span className={props.warn ? 'qcp-fill qcp-fillWarn' : 'qcp-fill'} style={{ width: `${String(props.percent)}%` }} />
+    </span>
   )
 }
 
-function QuotaRow(props: { label: string; value: string }): React.ReactElement {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-      <span style={{ opacity: 0.7 }}>{props.label}</span>
-      <span>{props.value}</span>
-    </div>
-  )
-}
-
-/** One credit pool: heading, numbers, bar and reset time. */
-function QuotaPool(props: {
+/** One credit pool as a labelled bar with its figures and reset moment. */
+function QuotaWindow(props: {
   t: QoderPanelText
-  title: string
+  label: string
   pool: QuotaSnapshotWire['personal']
   expiresAt?: number
-  dormant?: boolean
+  warn: boolean
 }): React.ReactElement {
   const { t, pool } = props
-  const ratio = pool.total > 0 ? pool.used / pool.total : pool.percentage
-  const reset = formatMoment(props.expiresAt, t.lang) ?? t.noDeadline
+  const percent = percentOf(usedRatio(pool.used, pool.total, pool.percentage))
   return (
-    <div style={{ display: 'grid', gap: '6px', padding: '10px 12px', border: '1px solid rgba(127,127,127,0.3)', borderRadius: '8px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-        <strong>{props.title}</strong>
-        {props.dormant === true ? <em>{t.dormant}</em> : <span>{formatRatio(ratio)}</span>}
+    <div className="qcp-window">
+      <div className="qcp-windowHead">
+        <span className="qcp-windowLabel">{props.label}</span>
+        <span className="qcp-windowValue">{`${formatCredits(pool.used)} / ${formatCredits(pool.total)} ${pool.unit}`}</span>
+        <span className="qcp-windowPct">{`${String(percent)}%`}</span>
       </div>
-      <QuotaBar ratio={ratio} label={props.title} />
-      <QuotaRow label={t.used} value={`${formatCredits(pool.used)} / ${formatCredits(pool.total)} ${pool.unit}`} />
-      <QuotaRow label={t.remaining} value={`${formatCredits(pool.remaining)} ${pool.unit}`} />
-      <QuotaRow label={t.resetAt} value={reset} />
+      <QuotaBar large percent={percent} warn={props.warn} label={props.label} />
+      <span className="qcp-caption">{`${t.resetAt} ${formatMoment(props.expiresAt, t.lang) ?? t.noDeadline}`}</span>
+    </div>
+  )
+}
+
+/** One figure that has a whole tile line each. */
+function QuotaTile(props: { label: string; value: string; sub?: string; small?: boolean }): React.ReactElement {
+  return (
+    <div className="qcp-tile">
+      <span className="qcp-tileLabel">{props.label}</span>
+      <span className={props.small === true ? 'qcp-tileValue qcp-tileValueSm' : 'qcp-tileValue'}>{props.value}</span>
+      {props.sub === undefined ? null : <span className="qcp-tileSub" title={props.sub}>{props.sub}</span>}
     </div>
   )
 }
@@ -132,73 +176,25 @@ function useView(props: QoderQuotaSurfaceProps): QuotaView {
   return { t, snapshot, report: snapshot.report }
 }
 
-/** The shortest and the longest window, which is all the sidebar line needs. */
-function windowExtremes(spend: QuotaSpendWire): {
-  short?: QuotaSpendWindowWire
-  long?: QuotaSpendWindowWire
-} {
-  let short: QuotaSpendWindowWire | undefined
-  let long: QuotaSpendWindowWire | undefined
-  for (const window of spend.windows) {
-    if (short === undefined || window.spanMs < short.spanMs) short = window
-    if (long === undefined || window.spanMs > long.spanMs) long = window
-  }
-  return {
-    ...short === undefined ? {} : { short },
-    ...long === undefined ? {} : { long },
-  }
-}
-
 /**
- * The sidebar's one-line rolling summary: the shortest and the longest window
- * the Host reports, which is the five-hour and weekly pair it publishes today.
- * The two ends are picked by span rather than by index, so a Host that adds a
- * window cannot silently change what the line means.
+ * The host reports a missing remote and a missing PAT as prose, so the surfaces
+ * name those two states instead of echoing the message; any other failure keeps
+ * the host's own words, which are the actionable part.
  */
-function spendBrief(spend: QuotaSpendWire, t: QoderPanelText): string | undefined {
-  const { short, long } = windowExtremes(spend)
-  if (short === undefined || long === undefined) return undefined
-  const windows = short.spanMs === long.spanMs ? [short] : [short, long]
-  const parts = windows.map(
-    (window) => `${spendWindowLabel(window.spanMs, t, true)} ${formatCredits(window.credits)}`,
-  )
-  return `${parts.join(' · ')} ${t.creditsUnit}`
+function statusHeadline(t: QoderPanelText, error: string): { title: string; detail?: string } {
+  if (error === QUOTA_REMOTE_UNMOUNTED_ERROR) return { title: t.unavailable }
+  if (/no PAT|personal access token/i.test(error)) return { title: t.notConfigured, detail: error }
+  return { title: t.error, detail: error }
 }
 
-/** Locally measured rolling spend: one row per window, plus the disclaimer. */
-function SpendSection(props: { t: QoderPanelText; spend: QuotaSpendWire }): React.ReactElement {
-  const { t, spend } = props
-  return (
-    <section
-      data-qoder-spend="true"
-      style={{ display: 'grid', gap: '8px', padding: '10px 12px', border: '1px solid rgba(127,127,127,0.3)', borderRadius: '8px' }}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-        <strong>{t.spendTitle}</strong>
-        <small style={{ opacity: 0.75 }}>
-          {spend.updatedAt === undefined ? t.spendNever : formatMoment(spend.updatedAt, t.lang) ?? t.spendNever}
-        </small>
-      </div>
-      {spend.windows.map((window) => (
-        <div key={window.spanMs} style={{ display: 'grid', gap: '2px' }}>
-          <QuotaRow
-            label={spendWindowLabel(window.spanMs, t)}
-            value={`${formatCredits(window.credits)} ${t.creditsUnit}`}
-          />
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', opacity: 0.7 }}>
-            <small>{`${t.spendRequests} ${String(window.requests)}`}</small>
-            {window.resetsAt === undefined ? null : (
-              <small>{`${t.resetAt} ${formatMoment(window.resetsAt, t.lang) ?? t.noDeadline}`}</small>
-            )}
-          </div>
-        </div>
-      ))}
-      <small style={{ opacity: 0.7 }}>{t.spendHint}</small>
-    </section>
-  )
+/** The headline pool: the personal one, else whatever the account does hold. */
+function headlineOf(report: QuotaSnapshotWire | undefined): { pool: QuotaSnapshotWire['personal']; label: string } | undefined {
+  if (report?.personal !== undefined) return { pool: report.personal, label: 'personal' }
+  if (report?.addOnPool !== undefined) return { pool: report.addOnPool, label: 'addOn' }
+  return undefined
 }
 
-/** Sidebar footer row: hidden unless the toggle is on. */
+/** Sidebar footer row: the ring alone in the rail, a full card when expanded. */
 export function QoderQuotaFooterEntry(props: QoderQuotaSurfaceProps): React.ReactElement | null {
   const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false
   const { t, snapshot, report } = useView(props)
@@ -211,31 +207,67 @@ export function QoderQuotaFooterEntry(props: QoderQuotaSurfaceProps): React.Reac
 
   if (!enabled) return null
 
-  const summary = report === undefined
-    ? snapshot.status === 'loading' ? t.loading : t.error
-    : `${report.planTierName} · ${formatRatio(report.totalPercentage)}`
-  const brief = report?.spend === undefined ? undefined : spendBrief(report.spend, t)
+  const headline = headlineOf(report)
+  const percent = headline === undefined
+    ? 0
+    : percentOf(usedRatio(headline.pool.used, headline.pool.total, headline.pool.percentage))
+  const warn = report?.isQuotaExceeded === true || percent >= 100
+  const open = (): void => { props.open?.() }
 
+  // The rail: the shell passes `wide: false` here. Only the ring fits, so the
+  // words move into the tooltip and the accessible name.
+  if (props.wide === false) {
+    return (
+      <button
+        type="button"
+        className="qcp-rail"
+        data-qoder-quota-card="true"
+        aria-label={t.cardHint}
+        title={t.cardHint}
+        onClick={open}
+      >
+        <QuotaRing percent={percent} warn={warn} size={18} />
+      </button>
+    )
+  }
+
+  const badge = report?.planTierName
   return (
     <button
       type="button"
+      className="qcp-foot"
       data-qoder-quota-card="true"
+      aria-label={t.cardHint}
       title={t.cardHint}
-      onClick={() => { props.open?.() }}
-      style={{
-        display: 'grid', gap: '4px',
-        width: '100%', padding: '8px 10px', border: '1px solid rgba(127,127,127,0.35)',
-        borderRadius: '8px', background: 'transparent', color: 'inherit', cursor: 'pointer',
-        font: 'inherit', textAlign: 'left',
-      }}
+      onClick={open}
     >
-      <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-        <span>{t.cardTitle}</span>
-        <small style={{ opacity: 0.75 }}>{summary}</small>
+      <span className="qcp-top">
+        <QuotaRing percent={percent} warn={warn} size={16} />
+        <span className="qcp-name">{t.cardName}</span>
+        <span className="qcp-spacer" />
+        {warn
+          ? <span className="qcp-badge qcp-badgeWarn">{t.exceededShort}</span>
+          : badge === undefined ? null : <span className="qcp-badge">{badge}</span>}
       </span>
-      {/* The rolling totals are the part of "how much have I used" the monthly
-          pool cannot answer, so the card carries them on their own line. */}
-      {brief === undefined ? null : <small style={{ opacity: 0.6 }}>{brief}</small>}
+      {headline === undefined ? (
+        <span className="qcp-caption">{snapshot.status === 'error' ? t.error : t.loading}</span>
+      ) : (
+        <span className="qcp-row">
+          <span className="qcp-rowHead">
+            <span className="qcp-rowLabel">
+              {headline.label === 'personal' ? t.personalPool : t.addOnPool}
+            </span>
+            <span className="qcp-rowAmount">
+              {`${formatCredits(headline.pool.used)} / ${formatCredits(headline.pool.total)}`}
+            </span>
+            <span className="qcp-rowPct">{`${String(percent)}%`}</span>
+          </span>
+          <QuotaBar percent={percent} warn={warn} label={t.personalPool} />
+          <span className="qcp-caption">
+            {`${t.resetAt} ${formatMoment(report?.expiresAt, t.lang) ?? t.noDeadline}`}
+          </span>
+        </span>
+      )}
     </button>
   )
 }
@@ -251,6 +283,7 @@ export function QoderQuotaPanel(props: QoderQuotaSurfaceProps): React.ReactEleme
     return startAutoRefresh()
   }, [startAutoRefresh])
 
+  const now = Date.now()
   const refreshed = snapshot.fetchedAt === undefined
     ? t.never
     : formatMoment(snapshot.fetchedAt, t.lang) ?? t.never
@@ -259,91 +292,175 @@ export function QoderQuotaPanel(props: QoderQuotaSurfaceProps): React.ReactEleme
   const organization = report?.organizationPool
   const organizationActive = organization !== undefined && organization.available !== false
 
+  const percent = personal === undefined
+    ? percentOf(report?.totalPercentage ?? 0)
+    : percentOf(usedRatio(personal.used, personal.total, personal.percentage))
+  const exceeded = report?.isQuotaExceeded === true || (personal !== undefined && percent >= 100)
+  const failure = snapshot.status === 'error' && snapshot.error !== undefined
+    ? statusHeadline(t, snapshot.error)
+    : undefined
+
+  const cycleStart = formatShortDay(report?.periodStart, t.lang)
+  const cycleEnd = formatShortDay(report?.periodEnd, t.lang)
+  const days = daysUntil(report?.expiresAt, now)
+  // Plan tier is the identity headline, so this line carries what qualifies it:
+  // the account kind (a Teams seat reads differently from a personal one), the
+  // organization, and the role inside it.
+  const owner = joinParts([report?.userType, report?.organizationName, report?.organizationRole])
+
   return (
-    <section
-      data-qoder-quota-panel="true"
-      style={{ display: 'grid', gap: '12px', alignContent: 'start', padding: '16px 20px', overflow: 'auto', height: '100%' }}
-    >
-      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-        <h2 style={{ margin: 0, fontSize: '1.1em' }}>{t.panelTitle}</h2>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <button type="button" onClick={() => { props.refresh?.() }} disabled={snapshot.status === 'loading'}>
-            {snapshot.status === 'loading' ? t.loading : t.refresh}
-          </button>
-          {/* The panel replaces the Conversation in the center column and the
-              sidebar card only re-selects it, so without this exit the user
-              could not get back to the session. The glyph is the whole
-              content, so the name and tooltip carry the words. */}
-          <button
-            type="button"
-            aria-label={t.close}
-            title={t.closeHint}
-            onClick={() => { props.close?.() }}
-            style={{ border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: '1.2em', lineHeight: 1 }}
-          >
-            <span aria-hidden="true">×</span>
-          </button>
-        </div>
-      </header>
+    <section className="qcp-main" data-qoder-quota-panel="true">
+      <div className="qcp-inner">
+        <header className="qcp-head">
+          <div className="qcp-headText">
+            <h2 className="qcp-title">{t.panelTitle}</h2>
+            <span className="qcp-sub">{t.panelSubtitle}</span>
+          </div>
+          <div className="qcp-actions">
+            <span className="qcp-meta">{`${t.refreshedAt} ${refreshed}`}</span>
+            <button
+              type="button"
+              className="qcp-button"
+              onClick={() => { props.refresh?.() }}
+              disabled={snapshot.status === 'loading'}
+            >
+              {snapshot.status === 'loading' ? t.loading : t.refresh}
+            </button>
+            {/* The panel replaces the Conversation in the center column and the
+                sidebar card only re-selects it, so without this exit the user
+                could not get back to the session. The glyph is the whole
+                content, so the name and tooltip carry the words. */}
+            <button
+              type="button"
+              className="qcp-iconButton"
+              aria-label={t.close}
+              title={t.closeHint}
+              onClick={() => { props.close?.() }}
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </div>
+        </header>
 
-      {report?.isQuotaExceeded === true ? (
-        <div role="alert" style={{ padding: '8px 12px', border: '1px solid #d9534f', borderRadius: '8px' }}>
-          {t.exceeded}
-        </div>
-      ) : null}
+        {exceeded ? (
+          <div className="qcp-alert" role="alert">
+            <strong>{t.exceeded}</strong>
+            <span className="qcp-alertDetail">{t.exceededHint}</span>
+          </div>
+        ) : null}
 
-      {snapshot.status === 'error' ? (
-        <div role="alert" style={{ display: 'grid', gap: '6px' }}>
-          <span>{t.error}</span>
-          {snapshot.error !== undefined ? <small style={{ opacity: 0.7 }}>{snapshot.error}</small> : null}
-        </div>
-      ) : null}
-
-      {report === undefined ? null : (
-        <div style={{ display: 'grid', gap: '6px' }}>
-          <QuotaRow label={t.plan} value={report.planTierName} />
-          <QuotaRow label={t.account} value={report.userType} />
-          {report.organizationName === undefined ? null : (
-            <QuotaRow label={t.organization} value={report.organizationName} />
-          )}
-          {report.organizationRole === undefined ? null : (
-            <QuotaRow label={t.role} value={report.organizationRole} />
-          )}
-          <QuotaRow
-            label={t.billingCycle}
-            value={`${formatMoment(report.periodStart, t.lang) ?? t.noDeadline} → ${formatMoment(report.periodEnd, t.lang) ?? t.noDeadline}`}
-          />
-        </div>
-      )}
-
-      {personal === undefined ? null : (
-        <QuotaPool t={t} title={t.personalPool} pool={personal} expiresAt={report?.expiresAt} />
-      )}
-
-      {organization === undefined ? null : (
-        <QuotaPool
-          t={t}
-          title={t.organizationPool}
-          pool={organization}
-          expiresAt={report?.expiresAt}
-          {...(organizationActive ? {} : { dormant: true })}
-        />
-      )}
-
-      {report?.addOnPool === undefined ? null : (
-        <QuotaPool t={t} title={t.addOnPool} pool={report.addOnPool} expiresAt={report.expiresAt} />
-      )}
-
-      {report?.spend === undefined ? null : <SpendSection t={t} spend={report.spend} />}
-
-      <footer style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', opacity: 0.7 }}>
-        <small>{`${t.refreshedAt} ${refreshed}`}</small>
-        {report?.upgradeUrl === undefined ? null : (
-          <a href={report.upgradeUrl} target="_blank" rel="noreferrer">{t.upgrade}</a>
+        {failure === undefined ? null : (
+          <div className="qcp-alert" role="alert">
+            <strong>{failure.title}</strong>
+            {failure.detail === undefined
+              ? null
+              : <span className="qcp-alertDetail">{failure.detail}</span>}
+          </div>
         )}
-      </footer>
 
-      {enabled ? null : <small style={{ opacity: 0.7 }}>{t.settingsToggleHint}</small>}
+        {report === undefined ? (
+          <div className="qcp-card">
+            <span className="qcp-note">{snapshot.status === 'loading' || snapshot.status === 'idle' ? t.loading : t.error}</span>
+          </div>
+        ) : (
+          <div className="qcp-card">
+            <div className="qcp-identity">
+              <span className="qcp-avatar" aria-hidden="true">Q</span>
+              <div className="qcp-idText">
+                <span className="qcp-planName">{report.planTierName}</span>
+                {owner === '' ? null : <span className="qcp-planOwner">{owner}</span>}
+              </div>
+              <span className="qcp-spacer" />
+              {exceeded ? <span className="qcp-badge qcp-badgeWarn">{t.exceededShort}</span> : null}
+            </div>
+
+            <div className="qcp-divider" />
+
+            <div className="qcp-block">
+              <span className="qcp-blockTitle">{t.usageBlock}</span>
+              {personal === undefined
+                ? <span className="qcp-note">{t.noPersonalPool}</span>
+                : (
+                    <QuotaWindow
+                      t={t}
+                      label={t.personalPool}
+                      pool={personal}
+                      {...(report.expiresAt === undefined ? {} : { expiresAt: report.expiresAt })}
+                      warn={exceeded}
+                    />
+                  )}
+            </div>
+
+            {personal === undefined ? null : (
+              <div className="qcp-tiles">
+                <QuotaTile
+                  label={t.billingCycle}
+                  value={cycleStart === undefined || cycleEnd === undefined
+                    ? t.noDeadline
+                    : `${cycleStart} → ${cycleEnd}`}
+                  {...(formatYearSpan(report.periodStart, report.periodEnd) === undefined
+                    ? {}
+                    : { sub: formatYearSpan(report.periodStart, report.periodEnd) })}
+                  small
+                />
+                <QuotaTile
+                  label={t.used}
+                  value={`${formatCredits(personal.used)} ${personal.unit}`}
+                  sub={`${t.limit} ${formatCredits(personal.total)} ${personal.unit}`}
+                />
+                <QuotaTile
+                  label={t.remaining}
+                  value={`${formatCredits(personal.remaining)} ${personal.unit}`}
+                  sub={`${String(Math.max(0, 100 - percent))}%`}
+                />
+                <QuotaTile
+                  label={t.resetAt}
+                  value={formatDay(report.expiresAt, t.lang) ?? t.noDeadline}
+                  {...(days === undefined ? {} : { sub: `${String(days)} ${t.daysLeftSuffix}` })}
+                  small
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {report?.addOnPool === undefined ? null : (
+          <div className="qcp-card">
+            <div className="qcp-block">
+              <span className="qcp-blockTitle">{t.addOnPool}</span>
+              <QuotaWindow
+                t={t}
+                label={t.addOnPool}
+                pool={report.addOnPool}
+                {...(report.expiresAt === undefined ? {} : { expiresAt: report.expiresAt })}
+                warn={false}
+              />
+            </div>
+          </div>
+        )}
+
+        {organizationActive ? (
+          <div className="qcp-card">
+            <div className="qcp-block">
+              <span className="qcp-blockTitle">{t.organizationPool}</span>
+              <QuotaWindow
+                t={t}
+                label={t.organizationPool}
+                pool={organization}
+                {...(report?.expiresAt === undefined ? {} : { expiresAt: report.expiresAt })}
+                warn={false}
+              />
+            </div>
+          </div>
+        ) : organization === undefined ? null : <span className="qcp-note">{t.orgPoolDormant}</span>}
+
+        <div className="qcp-panelFoot">
+          {report?.upgradeUrl === undefined ? null : (
+            <a className="qcp-link" href={report.upgradeUrl} target="_blank" rel="noreferrer">{t.upgrade}</a>
+          )}
+          {enabled ? null : <span className="qcp-note">{t.settingsToggleHint}</span>}
+        </div>
+      </div>
     </section>
   )
 }

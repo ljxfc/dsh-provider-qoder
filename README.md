@@ -2,7 +2,7 @@
 
 Qoder CN provider plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). It keeps Qoder's PAT exchange, COSY signing, WAF encoding, SSE transport, and live model catalog. The provider route is `qoder-cn`.
 
-The primary target is DeepSeek Harness Desktop `v0.1.7-rc.2` (`dsh-v0.1.7-rc.2`).
+The primary target is DeepSeek Harness Desktop `v0.2.0-rc.2` (`dsh 0.2.0-rc.2`), declared as `engines.dsh: ^0.2.0-rc.2`.
 
 ## Install in DeepSeek Harness Desktop
 
@@ -37,6 +37,15 @@ For a persistent Windows setup, add the same name/value under **Windows Settings
 The provider checks the stored credential first and then the launch environment. `QODERCN_PAT` is an accepted alias; `QODER_API_KEY` is accepted only when its value starts with `pt-`. Do not use a Qoder job token (`jt-...`) as the PAT.
 
 Public CN cloud needs no endpoint settings. For an enterprise VPC, set `QODER_VPC_INSTANCE` in the launch environment before starting Desktop, or provide the corresponding `llm-qoder` profile value through the active DSH configuration.
+
+## Plans and quota
+
+The client half can show Qoder CN's plan and credit usage in two places.
+
+- **Sidebar card** — a footer entry directly above **Settings**. It is off by default; turn it on under **Settings → the `qoder-cn` provider → 集成与显示 → 在侧边栏显示额度卡片** (the `showSidebarQuota` setting). While it is off, nothing renders and no background quota poll runs. The card follows the sidebar's own form: a 36px progress ring in the collapsed rail, and the full card — ring, plan tier, used/total credits, progress bar, reset time — when the sidebar is expanded.
+- **Quota panel** — click the card to open it in the center column. It lists the billing cycle, the account's credit pools, and the reset countdown. The `×` returns to the conversation; opening the panel does not switch sessions.
+
+Both surfaces read the plan quota service (`/api/v2/user/plan`, `/api/v2/quota/usage`, `/api/v1/me/usage`). A plan with no configured PAT reports that state instead of an error. Qoder CN reports a single credit pool per billing cycle and publishes no rolling 5-hour or weekly window, so the surfaces show the cycle only.
 
 ## Models and transport
 

@@ -8,6 +8,11 @@
  * number and date formatting, and reading it back out of the same translator
  * keeps the whole panel on one language source.
  *
+ * This table also decides the SHAPE of the surfaces, which is why it carries no
+ * rolling-window keys: Qoder CN reports one credit pool per billing cycle (its
+ * `/api/v2/user/plan`, `/api/v2/quota/usage` and `/api/v1/me/usage` expose no
+ * 5-hour or weekly window), so a window the UI cannot fill does not exist here.
+ *
  * @module dsh-provider-qoder/client/copy
  */
 
@@ -18,12 +23,14 @@ export const PANEL_LOCALE_NS = 'panel.qoder'
 export interface QoderPanelText {
   /** Language code (`zh` or `en`) used for date and number formatting. */
   lang: string
-  /** Sidebar footer card label. */
-  cardTitle: string
-  /** Sidebar footer card tooltip. */
+  /** Sidebar card name. */
+  cardName: string
+  /** Sidebar card tooltip, and the rail button's accessible name. */
   cardHint: string
   /** Middle-column panel heading. */
   panelTitle: string
+  /** Middle-column panel subtitle. */
+  panelSubtitle: string
   /** Close button accessible name. */
   close: string
   /** Close button tooltip. */
@@ -38,34 +45,38 @@ export interface QoderPanelText {
   notConfigured: string
   /** Read failed; retry affordance. */
   error: string
-  /** Plan tier row label. */
-  plan: string
-  /** Account kind row label. */
-  account: string
-  /** Organization row label. */
-  organization: string
-  /** Organization role row label. */
-  role: string
-  /** Billing window row label. */
-  billingCycle: string
-  /** Personal plan pool heading. */
+  /** Heading of the current-cycle usage block. */
+  usageBlock: string
+  /** Personal plan pool label. */
   personalPool: string
-  /** Organization resource package heading. */
+  /** Account holds no personal plan pool. */
+  noPersonalPool: string
+  /** Organization resource package label. */
   organizationPool: string
-  /** Purchased/gifted add-on credits heading. */
+  /** Pool is present but not currently drawn on. */
+  orgPoolDormant: string
+  /** Purchased/gifted add-on credits label. */
   addOnPool: string
-  /** Consumed amount label. */
+  /** Billing window tile label. */
+  billingCycle: string
+  /** Consumed amount tile label. */
   used: string
-  /** Remaining amount label. */
+  /** Remaining amount tile label. */
   remaining: string
-  /** Reset / expiry row label. */
+  /** Cap, shown under the consumed amount. */
+  limit: string
+  /** Reset / expiry label. */
   resetAt: string
   /** Shown when the account reports no deadline. */
   noDeadline: string
-  /** Pool is present but not currently drawn on. */
-  dormant: string
+  /** Suffix of the day count, as in `24 天后` / `24 days left`. */
+  daysLeftSuffix: string
   /** Quota exhausted banner. */
   exceeded: string
+  /** Quota exhausted pill in the daily card. */
+  exceededShort: string
+  /** Consequence of an exhausted pool. */
+  exceededHint: string
   /** Upgrade link label. */
   upgrade: string
   /** Last successful read label. */
@@ -78,40 +89,15 @@ export interface QoderPanelText {
   settingsToggleHint: string
   /** Settings toggle read/write failure. */
   settingsToggleFailed: string
-  /** Locally measured rolling-spend section heading. */
-  spendTitle: string
-  /** Locally measured rolling-spend disclaimer. */
-  spendHint: string
-  /** Shown when the ledger holds nothing yet. */
-  spendNever: string
-  /** Billed-request count label inside one rolling window. */
-  spendRequests: string
-  /** Credit unit used by the rolling totals. */
-  creditsUnit: string
-  /** Five-hour rolling window label. */
-  window5h: string
-  /** Day-long rolling window label. */
-  window24h: string
-  /** Weekly rolling window label. */
-  window7d: string
-  /** Five-hour label for the compact sidebar line. */
-  window5hShort: string
-  /** Day-long label for the compact sidebar line. */
-  window24hShort: string
-  /** Weekly label for the compact sidebar line. */
-  window7dShort: string
-  /** Hour unit for an unrecognised short window. */
-  hoursUnit: string
-  /** Day unit for an unrecognised window. */
-  daysUnit: string
 }
 
 /** Chinese copy (Qoder CN's own language). */
 export const PANEL_TEXT_ZH: QoderPanelText = {
   lang: 'zh',
-  cardTitle: '额度',
+  cardName: 'Qoder CN',
   cardHint: '查看 Qoder CN 套餐与额度',
   panelTitle: 'Qoder CN 套餐与额度',
+  panelSubtitle: '按计费周期统计的积分用量',
   close: '返回会话',
   closeHint: '关闭此面板并返回当前会话',
   refresh: '刷新',
@@ -119,47 +105,37 @@ export const PANEL_TEXT_ZH: QoderPanelText = {
   unavailable: '当前 profile 未挂载额度服务。',
   notConfigured: '尚未配置 PAT，无法读取额度。',
   error: '额度读取失败',
-  plan: '套餐',
-  account: '账户类型',
-  organization: '组织',
-  role: '角色',
-  billingCycle: '计费周期',
+  usageBlock: '额度',
   personalPool: '个人套餐额度',
+  noPersonalPool: '该账户没有个人套餐额度。',
   organizationPool: '组织资源包',
+  orgPoolDormant: '组织资源包当前未启用。',
   addOnPool: '购买 / 赠送额度',
+  billingCycle: '计费周期',
   used: '已用',
   remaining: '剩余',
+  limit: '上限',
   resetAt: '重置时间',
   noDeadline: '未提供',
-  dormant: '当前未启用',
+  daysLeftSuffix: '天后',
   exceeded: '额度已用尽',
+  exceededShort: '已用尽',
+  exceededHint: '本计费周期的积分已用完，新的请求可能被拒绝。',
   upgrade: '升级套餐',
   refreshedAt: '更新于',
   never: '尚未读取',
   settingsToggle: '在侧边栏显示额度卡片',
   settingsToggleHint: '默认关闭；关闭时左侧栏不渲染卡片，也不会后台刷新额度。',
   settingsToggleFailed: '开关写入失败，请重试。',
-  spendTitle: '滚动用量',
-  spendHint: '本地统计：由本机已完成的请求累计，Qoder 本身不提供 5 小时 / 每周窗口；月度额度以上方套餐池为准。',
-  spendNever: '尚无本地记录',
-  spendRequests: '请求',
-  creditsUnit: '积分',
-  window5h: '5 小时',
-  window24h: '24 小时',
-  window7d: '7 天',
-  window5hShort: '5h',
-  window24hShort: '24h',
-  window7dShort: '7d',
-  hoursUnit: '小时',
-  daysUnit: '天',
 }
 
 /** English copy. */
 export const PANEL_TEXT_EN: QoderPanelText = {
   lang: 'en',
-  cardTitle: 'Usage',
+  cardName: 'Qoder CN',
   cardHint: 'Qoder CN plan and quota',
   panelTitle: 'Qoder CN plan & quota',
+  panelSubtitle: 'Credits used in the current billing cycle',
   close: 'Back to conversation',
   closeHint: 'Close this panel and return to the current conversation',
   refresh: 'Refresh',
@@ -167,67 +143,28 @@ export const PANEL_TEXT_EN: QoderPanelText = {
   unavailable: 'The quota service is not mounted in this profile.',
   notConfigured: 'No PAT is configured yet, so quota cannot be read.',
   error: 'Could not read the quota',
-  plan: 'Plan',
-  account: 'Account',
-  organization: 'Organization',
-  role: 'Role',
-  billingCycle: 'Billing cycle',
+  usageBlock: 'Usage',
   personalPool: 'Personal plan credits',
+  noPersonalPool: 'This account has no personal plan credits.',
   organizationPool: 'Organization package',
+  orgPoolDormant: 'The organization package is currently not drawn on.',
   addOnPool: 'Purchased / gifted credits',
+  billingCycle: 'Billing cycle',
   used: 'Used',
   remaining: 'Remaining',
+  limit: 'Limit',
   resetAt: 'Resets',
   noDeadline: 'Not reported',
-  dormant: 'Not currently drawn on',
+  daysLeftSuffix: 'days left',
   exceeded: 'Quota exhausted',
+  exceededShort: 'Exhausted',
+  exceededHint: 'This billing cycle is spent; new requests may be rejected.',
   upgrade: 'Upgrade plan',
   refreshedAt: 'Updated',
   never: 'Never',
   settingsToggle: 'Show the quota card in the sidebar',
   settingsToggleHint: 'Off by default; while off the sidebar renders no card and no background quota refresh runs.',
   settingsToggleFailed: 'The toggle could not be stored. Try again.',
-  spendTitle: 'Rolling usage',
-  spendHint: 'Measured locally from completed requests on this machine — Qoder reports no five-hour or weekly window itself; the monthly pools above stay authoritative.',
-  spendNever: 'No local records yet',
-  spendRequests: 'Requests',
-  creditsUnit: 'credits',
-  window5h: '5 hours',
-  window24h: '24 hours',
-  window7d: '7 days',
-  window5hShort: '5h',
-  window24hShort: '24h',
-  window7dShort: '7d',
-  hoursUnit: 'hours',
-  daysUnit: 'days',
-}
-
-/** One hour, in milliseconds; the window labels are keyed by these spans. */
-const HOUR_MS = 60 * 60 * 1000
-
-/**
- * Label one rolling window.
- *
- * The three spans the Host publishes have their own words in both languages; an
- * unrecognised span — a Host that adds or changes a window — falls back to a
- * computed duration, so the surface stays truthful instead of printing a raw
- * millisecond count at the user.
- * @param spanMs - the window length in milliseconds.
- * @param t - the resolved copy table.
- * @param compact - whether the sidebar's short form is wanted.
- * @returns the window label.
- */
-export function spendWindowLabel(spanMs: number, t: QoderPanelText, compact = false): string {
-  switch (spanMs) {
-    case 5 * HOUR_MS: return compact ? t.window5hShort : t.window5h
-    case 24 * HOUR_MS: return compact ? t.window24hShort : t.window24h
-    case 7 * 24 * HOUR_MS: return compact ? t.window7dShort : t.window7d
-    default: break
-  }
-  const days = spanMs / (24 * HOUR_MS)
-  if (Number.isInteger(days) && days >= 1) return `${String(days)} ${t.daysUnit}`
-  const hours = Math.max(1, Math.round(spanMs / HOUR_MS))
-  return `${String(hours)} ${t.hoursUnit}`
 }
 
 /** Resolve the one table a raw `t` seat asks for. */

@@ -34,55 +34,7 @@ export interface QoderInnerChunk {
     total_tokens?: number
     prompt_tokens_details?: { cached_tokens?: number }
     completion_tokens_details?: { reasoning_tokens?: number }
-    /**
-     * Credits billed for the request, after any promotion discount. Qoder
-     * reports this on the same frame as the token counts; it is the only
-     * per-request credit figure the service publishes anywhere.
-     */
-    credits?: number
-    /** Credits that would have been billed without the discount. */
-    original_credits?: number
-    /** Whether the gateway counted this request against the quota at all. */
-    billable?: boolean
   }
-}
-
-/**
- * Per-request credit accounting, reported beside the token counts.
- *
- * These figures cannot ride {@link TokenUsage} — that contract carries counts
- * only — so {@link translate} hands them to an observer while it still holds
- * the frame that delivered them.
- */
-export interface QoderUsageAccounting {
-  /** Credits billed for this request, after any discount. */
-  credits?: number
-  /** Credits that would have been billed without the discount. */
-  originalCredits?: number
-  /** Whether the gateway counted this request against the quota at all. */
-  billable?: boolean
-}
-
-/** Receives one request's credit accounting when the gateway reports any. */
-export type QoderUsageObserver = (accounting: QoderUsageAccounting) => void
-
-/**
- * Read the credit accounting out of one usage frame.
- * @param usage - the inner chunk's usage object.
- * @returns the reported fields, or `undefined` when the frame carries none.
- */
-export function readUsageAccounting(
-  usage: NonNullable<QoderInnerChunk['usage']>,
-): QoderUsageAccounting | undefined {
-  const accounting: QoderUsageAccounting = {}
-  if (typeof usage.credits === 'number' && Number.isFinite(usage.credits)) {
-    accounting.credits = usage.credits
-  }
-  if (typeof usage.original_credits === 'number' && Number.isFinite(usage.original_credits)) {
-    accounting.originalCredits = usage.original_credits
-  }
-  if (typeof usage.billable === 'boolean') accounting.billable = usage.billable
-  return Object.keys(accounting).length === 0 ? undefined : accounting
 }
 
 /** One open block under assembly. */
@@ -167,15 +119,11 @@ function parseInnerObject(body: unknown): QoderInnerChunk {
  * block-ends, usage, and finish are deferred to the sentinel.
  * @param envelopes - decoded SSE envelopes, `[DONE]`-terminated.
  * @param reasoningEnabled - whether thinking is on (enables the tag fallback).
- * @param observeUsage - receives this request's credit accounting, reported
- * only for a response that reached the sentinel. Called synchronously before
- * the deferred chunks, so a slow observer cannot delay the stream's end.
  * @returns the harness chunk stream.
  */
 export async function* translate(
   envelopes: AsyncIterable<QoderEnvelope | string>,
   reasoningEnabled = true,
-  observeUsage?: QoderUsageObserver,
 ): AsyncGenerator<StreamChunk> {
   let nextIndex = 0
   let textBlock: OpenBlock | undefined
@@ -184,7 +132,6 @@ export async function* translate(
   const order: OpenBlock[] = []
   let pendingFinish: FinishReason | undefined
   let pendingUsage: TokenUsage | undefined
-  let pendingAccounting: QoderUsageAccounting | undefined
 
   const open = (kind: OpenBlock['kind']): OpenBlock => {
     const block: OpenBlock = { index: nextIndex++, kind, text: '' }
@@ -194,17 +141,6 @@ export async function* translate(
 
   for await (const item of envelopes) {
     if (item === DONE) {
-      // Accounting is delivered as soon as the response is known to be
-      // complete — ahead of the deferred chunks, and behind a guard so an
-      // observer that throws cannot turn a finished response into a failure.
-      if (pendingAccounting !== undefined && observeUsage !== undefined) {
-        try {
-          observeUsage(pendingAccounting)
-        } catch (_observerFailure) {
-          // An observer is a recording side channel, never part of the
-          // response contract.
-        }
-      }
       for (const block of order) {
         yield { type: 'block-end', index: block.index, block: closeBlock(block) }
       }
@@ -318,11 +254,7 @@ export async function* translate(
       }
     }
 
-    if (inner.usage) {
-      pendingUsage = mapUsage(inner.usage)
-      const accounting = readUsageAccounting(inner.usage)
-      if (accounting !== undefined) pendingAccounting = accounting
-    }
+    if (inner.usage) pendingUsage = mapUsage(inner.usage)
   }
 
   // parseQoderSse guarantees the [DONE] sentinel (or throws); reaching here

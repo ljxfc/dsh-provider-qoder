@@ -42,8 +42,7 @@ export type { QoderAdapterOptions, QoderCatalogModel, QoderConnectionOptions } f
 export { qoderEncodeBody } from './qoder-encoding.ts'
 export { serializeMessages, serializeRequest, systemTextOf } from './serialize.ts'
 export type { QoderMessage, QoderSerializedRequest } from './serialize.ts'
-export { mapFinishReason, mapUsage, readUsageAccounting } from './translate.ts'
-export type { QoderUsageAccounting, QoderUsageObserver } from './translate.ts'
+export { mapFinishReason, mapUsage } from './translate.ts'
 export { parseQoderSse, parseEnvelope, DONE } from './sse.ts'
 export {
   buildQoderAuthHeaders,
@@ -55,17 +54,7 @@ export { exchangeJobToken, refreshJobToken, fetchUserInfo } from './pat.ts'
 export { fetchQoderQuota, parseQuotaPool, QUOTA_TIMEOUT_MS } from './usage.ts'
 export type { QoderQuotaPool, QoderUsageReport } from './usage.ts'
 export { parseQuotaSnapshot, QUOTA_ENDPOINT } from './usage-wire.ts'
-export type { QuotaPoolWire, QuotaSnapshotWire, QuotaSpendWire, QuotaSpendWindowWire } from './usage-wire.ts'
-export {
-  readQoderSpend,
-  readSpendRecords,
-  recordQoderSpend,
-  spendLedgerPath,
-  summariseSpend,
-  QODER_SPEND_WINDOWS_MS,
-  SPEND_RETENTION_MS,
-} from './usage-ledger.ts'
-export type { QoderSpendRecord } from './usage-ledger.ts'
+export type { QuotaPoolWire, QuotaSnapshotWire } from './usage-wire.ts'
 export {
   compareModelsForSelector,
   formatContextWindow,
@@ -77,6 +66,27 @@ export {
   parsePromotion,
 } from './annotate.ts'
 export type { AnnotatableModel, QoderLang, QoderLocalizedText, QoderModelPromotion } from './annotate.ts'
+// Presentation contract of the two quota surfaces. The math is exported so the
+// tests can check the ring and bar figures directly instead of only through the
+// bundled browser half, and the stylesheet string is exported so the same tests
+// can audit its selectors for containment — `./client/index.ts` is the only
+// thing that injects it.
+export {
+  clampPercent,
+  daysUntil,
+  formatCredits,
+  formatDay,
+  formatMoment,
+  formatShortDay,
+  formatYearSpan,
+  joinParts,
+  percentOf,
+  ringDashOffset,
+  RING_CIRCUMFERENCE,
+  RING_RADIUS,
+  usedRatio,
+} from './quota-view.ts'
+export { QUOTA_CSS, QUOTA_CSS_ID, injectQuotaStyles } from './quota-styles.ts'
 
 export const name = 'llm-qoder'
 export const inject = ['llm']

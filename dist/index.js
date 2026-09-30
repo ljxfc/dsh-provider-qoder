@@ -781,17 +781,6 @@ function splitThinking(chunk) {
 }
 
 // src/translate.ts
-function readUsageAccounting(usage) {
-  const accounting = {};
-  if (typeof usage.credits === "number" && Number.isFinite(usage.credits)) {
-    accounting.credits = usage.credits;
-  }
-  if (typeof usage.original_credits === "number" && Number.isFinite(usage.original_credits)) {
-    accounting.originalCredits = usage.original_credits;
-  }
-  if (typeof usage.billable === "boolean") accounting.billable = usage.billable;
-  return Object.keys(accounting).length === 0 ? void 0 : accounting;
-}
 function mapFinishReason(reason) {
   switch (reason) {
     case "stop":
@@ -841,7 +830,7 @@ function parseInnerObject(body) {
   }
   return {};
 }
-async function* translate(envelopes, reasoningEnabled = true, observeUsage) {
+async function* translate(envelopes, reasoningEnabled = true) {
   let nextIndex = 0;
   let textBlock;
   let reasoningBlock;
@@ -849,7 +838,6 @@ async function* translate(envelopes, reasoningEnabled = true, observeUsage) {
   const order = [];
   let pendingFinish;
   let pendingUsage;
-  let pendingAccounting;
   const open = (kind) => {
     const block = { index: nextIndex++, kind, text: "" };
     order.push(block);
@@ -857,12 +845,6 @@ async function* translate(envelopes, reasoningEnabled = true, observeUsage) {
   };
   for await (const item of envelopes) {
     if (item === DONE) {
-      if (pendingAccounting !== void 0 && observeUsage !== void 0) {
-        try {
-          observeUsage(pendingAccounting);
-        } catch (_observerFailure) {
-        }
-      }
       for (const block of order) {
         yield { type: "block-end", index: block.index, block: closeBlock(block) };
       }
@@ -965,124 +947,9 @@ async function* translate(envelopes, reasoningEnabled = true, observeUsage) {
         pendingFinish = mapFinishReason(choice.finish_reason);
       }
     }
-    if (inner.usage) {
-      pendingUsage = mapUsage(inner.usage);
-      const accounting = readUsageAccounting(inner.usage);
-      if (accounting !== void 0) pendingAccounting = accounting;
-    }
+    if (inner.usage) pendingUsage = mapUsage(inner.usage);
   }
   throw new LlmError3("Qoder SSE payload stream ended without [DONE]", "STREAM_CLOSED");
-}
-
-// src/usage-ledger.ts
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join2 } from "node:path";
-var HOUR_MS = 60 * 60 * 1e3;
-var QODER_SPEND_WINDOWS_MS = [
-  5 * HOUR_MS,
-  24 * HOUR_MS,
-  7 * 24 * HOUR_MS
-];
-var SPEND_RETENTION_MS = 8 * 24 * HOUR_MS;
-var CREDIT_DECIMALS = 1e6;
-function spendLedgerPath() {
-  const configured = process.env.DSH_HOME?.trim();
-  const root = configured !== void 0 && configured.length > 0 ? configured : join2(homedir2(), ".dsh");
-  return join2(root, "qoder-spend.jsonl");
-}
-function parseRecord(line) {
-  let value;
-  try {
-    value = JSON.parse(line);
-  } catch {
-    return void 0;
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return void 0;
-  const source = value;
-  const { at, credits } = source;
-  if (typeof at !== "number" || !Number.isFinite(at)) return void 0;
-  if (typeof credits !== "number" || !Number.isFinite(credits) || credits <= 0) return void 0;
-  const record2 = { at, credits };
-  const original = source.originalCredits;
-  if (typeof original === "number" && Number.isFinite(original) && original > 0) {
-    record2.originalCredits = original;
-  }
-  const model = source.model;
-  if (typeof model === "string" && model.length > 0) record2.model = model;
-  return record2;
-}
-function roundCredits(value) {
-  return Math.round(value * CREDIT_DECIMALS) / CREDIT_DECIMALS;
-}
-function summariseSpend(records, now, windows = QODER_SPEND_WINDOWS_MS) {
-  const fresh = records.filter(
-    (record2) => record2.at <= now && now - record2.at < SPEND_RETENTION_MS
-  );
-  const summary = {
-    windows: windows.map((spanMs) => {
-      let credits = 0;
-      let requests = 0;
-      let oldest;
-      for (const record2 of fresh) {
-        if (now - record2.at >= spanMs) continue;
-        credits += record2.credits;
-        requests += 1;
-        if (oldest === void 0 || record2.at < oldest) oldest = record2.at;
-      }
-      const window = { spanMs, credits: roundCredits(credits), requests };
-      if (oldest !== void 0) window.resetsAt = oldest + spanMs;
-      return window;
-    })
-  };
-  let updatedAt;
-  for (const record2 of fresh) {
-    if (updatedAt === void 0 || record2.at > updatedAt) updatedAt = record2.at;
-  }
-  if (updatedAt !== void 0) summary.updatedAt = updatedAt;
-  return summary;
-}
-async function recordQoderSpend(record2) {
-  if (!Number.isFinite(record2.credits) || record2.credits <= 0) return;
-  try {
-    const path = spendLedgerPath();
-    await mkdir(dirname2(path), { recursive: true });
-    await appendFile(path, `${JSON.stringify(record2)}
-`, "utf8");
-  } catch {
-  }
-}
-async function compactLedger(path, records) {
-  try {
-    await writeFile(path, records.map((record2) => `${JSON.stringify(record2)}
-`).join(""), "utf8");
-  } catch {
-  }
-}
-async function readSpendRecords(now = Date.now()) {
-  const path = spendLedgerPath();
-  let text;
-  try {
-    text = await readFile(path, "utf8");
-  } catch {
-    return [];
-  }
-  const kept = [];
-  let dropped = 0;
-  for (const line of text.split("\n")) {
-    if (line.length === 0) continue;
-    const record2 = parseRecord(line);
-    if (record2 === void 0 || now - record2.at >= SPEND_RETENTION_MS) {
-      dropped += 1;
-      continue;
-    }
-    kept.push(record2);
-  }
-  if (dropped > 0) await compactLedger(path, kept);
-  return kept;
-}
-async function readQoderSpend(now = Date.now()) {
-  return summariseSpend(await readSpendRecords(now), now);
 }
 
 // src/annotate.ts
@@ -1483,12 +1350,11 @@ var QoderAdapter = class extends LlmAdapter {
     const connection = this.config.options();
     const rawPat = await this.config.resolveApiKey(connection);
     const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal);
-    const report = await fetchQoderQuota(
+    return fetchQoderQuota(
       jobToken,
       { gateway: connection.endpoints.gateway, openapi: connection.endpoints.openapi },
       signal
     );
-    return { ...report, spend: await readQoderSpend() };
   }
   async *request(options, signal, connection, rawPat, onComment) {
     const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal);
@@ -1613,37 +1479,7 @@ var QoderAdapter = class extends LlmAdapter {
       throw new LlmError4("Qoder CN API returned no response body", "EMPTY_RESPONSE");
     }
     const envelopes = parseQoderSse(response.body);
-    yield* translate(
-      mapEnvelopes(envelopes, onComment),
-      reasoningEnabled,
-      // The gateway reports the request's credit charge on the same frame as
-      // its token counts. Recording it here — the one place that knows both the
-      // charge and the model that produced it — is what lets the quota surfaces
-      // report a rolling window Qoder itself never publishes.
-      (accounting) => {
-        this.recordSpend(accounting, options.model);
-      }
-    );
-  }
-  /**
-   * Record one request's credit charge in the rolling ledger.
-   *
-   * Only a completed, actually billed request is worth a ledger line: a
-   * `billable: false` response (the gateway's answer to an unknown model key)
-   * and a zero charge would each add a request to a window without adding any
-   * spend. Recording is fire-and-forget — the response has already succeeded by
-   * this point, so the ledger must never be able to fail it.
-   */
-  recordSpend(accounting, model) {
-    if (accounting.billable === false) return;
-    const credits = accounting.credits;
-    if (credits === void 0 || !(credits > 0)) return;
-    void recordQoderSpend({
-      at: Date.now(),
-      credits,
-      ...accounting.originalCredits === void 0 ? {} : { originalCredits: accounting.originalCredits },
-      model
-    });
+    yield* translate(mapEnvelopes(envelopes, onComment), reasoningEnabled);
   }
   /** Exchange or refresh the job token for one PAT, caching per process. */
   async ensureJobToken(rawPat, endpoints, signal) {
@@ -1763,10 +1599,6 @@ function booleanField(source, key) {
   const value = source[key];
   return typeof value === "boolean" ? value : reject(key);
 }
-function arrayField(source, key) {
-  const value = source[key];
-  return Array.isArray(value) ? value : reject(key);
-}
 function parsePool(value, field) {
   const source = record(value, field);
   return {
@@ -1777,22 +1609,6 @@ function parsePool(value, field) {
     unit: stringField(source, "unit"),
     available: booleanField(source, "available")
   };
-}
-function parseSpend(value, field) {
-  const source = record(value, field);
-  const windows = arrayField(source, "windows").map((entry, index) => {
-    const window = record(entry, `${field}.windows[${String(index)}]`);
-    const parsed = {
-      spanMs: numberField(window, "spanMs"),
-      credits: numberField(window, "credits"),
-      requests: numberField(window, "requests")
-    };
-    if (window.resetsAt !== void 0) parsed.resetsAt = numberField(window, "resetsAt");
-    return parsed;
-  });
-  const spend = { windows };
-  if (source.updatedAt !== void 0) spend.updatedAt = numberField(source, "updatedAt");
-  return spend;
 }
 function parseQuotaSnapshot(value) {
   const source = record(value, "result");
@@ -1819,9 +1635,6 @@ function parseQuotaSnapshot(value) {
   }
   if (source.upgradeUrl !== void 0) {
     snapshot.upgradeUrl = stringField(source, "upgradeUrl");
-  }
-  if (source.spend !== void 0) {
-    snapshot.spend = parseSpend(source.spend, "spend");
   }
   return snapshot;
 }
@@ -1866,7 +1679,6 @@ function toQuotaSnapshot(report) {
   if (report.organizationPool !== void 0) snapshot.organizationPool = report.organizationPool;
   if (report.addOnPool !== void 0) snapshot.addOnPool = report.addOnPool;
   if (report.upgradeUrl !== void 0) snapshot.upgradeUrl = report.upgradeUrl;
-  if (report.spend !== void 0) snapshot.spend = report.spend;
   return snapshot;
 }
 var QoderUsageService = class extends TypertRemoteService {
@@ -1891,6 +1703,195 @@ function applyUsageRemote(ctx, deps) {
     const unregister = registry.register(QUOTA_HOST_CONTRIBUTION);
     remoteCtx.effect(() => () => void unregister(), "dsh-provider-qoder: usage remote");
   });
+}
+
+// src/quota-view.ts
+var RING_RADIUS = 7.25;
+var RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+function clampPercent(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, value));
+}
+function percentOf(ratio) {
+  return Math.round(clampPercent(ratio * 100));
+}
+function ringDashOffset(percent, circumference = RING_CIRCUMFERENCE) {
+  return Math.round(circumference * (1 - clampPercent(percent) / 100) * 1e3) / 1e3;
+}
+function usedRatio(used, total, fallback = 0) {
+  const usable = Number.isFinite(used) && Number.isFinite(total) && total > 0 ? used / total : fallback;
+  if (!Number.isFinite(usable)) return 0;
+  return Math.min(1, Math.max(0, usable));
+}
+function formatCredits(value) {
+  if (!Number.isFinite(value)) return "\u2014";
+  return String(Math.round(value * 100) / 100);
+}
+function locale(lang) {
+  return lang === "zh" ? "zh-CN" : "en-US";
+}
+function formatMoment(ms, lang) {
+  if (ms === void 0 || !Number.isFinite(ms)) return void 0;
+  try {
+    return new Date(ms).toLocaleString(locale(lang), {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  } catch {
+    return new Date(ms).toISOString();
+  }
+}
+function formatDay(ms, lang) {
+  if (ms === void 0 || !Number.isFinite(ms)) return void 0;
+  try {
+    return new Date(ms).toLocaleDateString(locale(lang), { year: "numeric", month: "2-digit", day: "2-digit" });
+  } catch {
+    return new Date(ms).toISOString().slice(0, 10);
+  }
+}
+function formatShortDay(ms, lang) {
+  if (ms === void 0 || !Number.isFinite(ms)) return void 0;
+  try {
+    return new Date(ms).toLocaleDateString(locale(lang), { month: "2-digit", day: "2-digit" });
+  } catch {
+    return new Date(ms).toISOString().slice(5, 10);
+  }
+}
+function formatYearSpan(start, end) {
+  const from = yearOf(start);
+  if (from === void 0) return void 0;
+  const to = yearOf(end);
+  return to === void 0 || to === from ? from : `${from} \u2192 ${to}`;
+}
+function yearOf(ms) {
+  if (ms === void 0 || !Number.isFinite(ms)) return void 0;
+  return String(new Date(ms).getFullYear());
+}
+function daysUntil(until, now) {
+  if (until === void 0 || !Number.isFinite(until) || until <= now) return void 0;
+  return Math.ceil((until - now) / 864e5);
+}
+function joinParts(parts, separator = " \xB7 ") {
+  return parts.filter((part) => part !== void 0 && part !== "").join(separator);
+}
+
+// src/quota-styles.ts
+var QUOTA_CSS_ID = "dsh-provider-qoder/QuotaSurfaces.module.css";
+var QUOTA_CSS = `
+/* ------------------------------------------------- sidebar footer entry */
+/* LOAD-BEARING (and the only unqualified rule here): the shell stacks this
+   list ABOVE the Settings seat and lays the list itself out as a flex ROW. An
+   occupant that declares a full-width line cannot shrink, so as a row it
+   overflows the column \u2014 measured on 0.2.0-rc.2 in the collapsed rail: the row
+   was 76px wide at x=-10.5 inside a 35px foot area, which is why the card used
+   to hang off the left edge of the sidebar. The ANCHOR is load-bearing too:
+   "footerActions" is not a stem this shell owns alone (dsh-client-ui-user-questions
+   renders a dialog's button row under the same stem, and an unqualified rule
+   would stack that row's side-by-side buttons on every page), so it is
+   qualified by "footArea", which the sidebar declares alone. The descendant
+   combinator survives a wrapper element appearing between the two. */
+[class*="_footArea"] [class*="_footerActions"]{flex-direction:column}
+
+/* The 56px rail: one icon button carrying the ring, matching the shell's own
+   rail geometry (its Settings seat measures 36px). */
+.qcp-rail{box-sizing:border-box;display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;width:36px;height:36px;margin:0 0 4px;padding:0;font:inherit;color:var(--dsw-alias-label-secondary,#61666b);cursor:pointer;background:0 0;border:1px solid transparent;border-radius:8px}
+.qcp-rail:hover{color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-interactive-bg-hover,#2631480f)}
+.qcp-rail:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#0f1115);outline-offset:1px}
+
+/* Expanded column: deliberately quiet \u2014 a surface beside Settings should read
+   as part of the column \u2014 with one hover step and a hairline border. */
+.qcp-foot{box-sizing:border-box;display:flex;flex:0 0 auto;flex-direction:column;gap:6px;width:100%;min-width:0;margin:0 0 4px;padding:8px;font:inherit;color:var(--dsw-alias-label-secondary,#61666b);text-align:left;cursor:pointer;background:0 0;border:1px solid transparent;border-radius:10px}
+.qcp-foot:hover{color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-interactive-bg-hover,#2631480f);border-color:var(--dsw-alias-border-l2,#0000001a)}
+.qcp-foot:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#0f1115);outline-offset:1px}
+.qcp-top{display:flex;align-items:center;gap:8px;min-width:0}
+.qcp-glyph{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;color:var(--dsw-alias-brand-primary,#0f1115)}
+.qcp-name{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--dsw-alias-label-primary,#0f1115);font-size:13px;font-weight:500;line-height:20px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-spacer{flex:1 1 auto;min-width:0}
+.qcp-badge{flex:0 0 auto;max-width:52%;overflow:hidden;padding:1px 8px;color:var(--dsw-alias-brand-primary,#0f1115);font-size:11px;font-weight:600;line-height:16px;text-overflow:ellipsis;white-space:nowrap;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border-radius:999px}
+.qcp-badgeWarn{color:var(--dsw-alias-state-error-primary,#ec1313)}
+
+/* One usage line: the label and its figures on a head row, the bar UNDER it \u2014
+   stacking the two lets the card show the credits without squeezing the bar
+   into whatever is left beside them. */
+.qcp-row{display:flex;flex-direction:column;gap:4px;min-width:0}
+.qcp-rowHead{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;min-width:0}
+.qcp-rowLabel{flex:1 1 auto;min-width:5em;overflow:hidden;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-rowAmount{flex:0 0 auto;margin-left:auto;color:var(--dsw-alias-label-secondary,#61666b);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.qcp-rowPct{flex:0 0 auto;width:34px;color:var(--dsw-alias-label-secondary,#61666b);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;text-align:right}
+/* display:block is load-bearing: the card's markup stays PHRASING content (it
+   renders inside a button), so these are spans \u2014 and an inline box ignores
+   width, which would collapse the fill to 0x0 and show no usage at all. */
+.qcp-bar{display:block;height:5px;overflow:hidden;background:rgba(127,127,127,.22);background:color-mix(in srgb,currentColor 14%,transparent);border-radius:999px}
+.qcp-barLg{display:block;height:8px;overflow:hidden;background:rgba(127,127,127,.22);background:color-mix(in srgb,currentColor 14%,transparent);border-radius:999px}
+.qcp-fill{display:block;height:100%;background:var(--dsw-alias-brand-primary,#0f1115);border-radius:999px;transition:width .3s ease}
+.qcp-fillWarn{background:var(--dsw-alias-state-error-primary,#ec1313)}
+.qcp-caption{display:block;min-width:0;overflow:hidden;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+
+/* ------------------------------------------------------------- the panel */
+.qcp-main{box-sizing:border-box;height:100%;overflow:auto}
+.qcp-inner{box-sizing:border-box;display:flex;flex-direction:column;gap:14px;max-width:720px;margin:0 auto;padding:24px 20px 40px}
+.qcp-head{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px}
+.qcp-headText{display:flex;flex-direction:column;gap:2px;min-width:0}
+.qcp-title{margin:0;color:var(--dsw-alias-label-primary,#0f1115);font-size:18px;font-weight:600;line-height:26px}
+.qcp-sub{color:var(--dsw-alias-label-tertiary,#81858c);font-size:12px;line-height:18px}
+.qcp-actions{display:flex;flex:0 0 auto;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px;margin-left:auto}
+.qcp-meta{color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.qcp-button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 12px;font:inherit;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#61666b);white-space:nowrap;cursor:pointer;background:0 0;border:1px solid var(--dsw-alias-border-l2,#0000001a);border-radius:999px}
+.qcp-button:hover:not(:disabled){color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-interactive-bg-hover,#2631480f)}
+.qcp-button:disabled{cursor:default;opacity:.5}
+.qcp-button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#0f1115);outline-offset:1px}
+.qcp-iconButton{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;font:inherit;font-size:16px;line-height:1;color:var(--dsw-alias-label-secondary,#61666b);cursor:pointer;background:0 0;border:1px solid transparent;border-radius:8px}
+.qcp-iconButton:hover{color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-interactive-bg-hover,#2631480f)}
+.qcp-iconButton:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#0f1115);outline-offset:1px}
+.qcp-card{box-sizing:border-box;display:flex;flex-direction:column;gap:14px;padding:16px 18px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,#0000001a);border-radius:14px}
+.qcp-identity{display:flex;align-items:center;gap:10px;min-width:0}
+.qcp-avatar{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;width:28px;height:28px;color:var(--dsw-alias-brand-primary,#0f1115);font-size:12px;font-weight:600;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border-radius:50%}
+.qcp-idText{display:flex;flex-direction:column;gap:1px;min-width:0}
+.qcp-planName{overflow:hidden;color:var(--dsw-alias-label-primary,#0f1115);font-size:13px;font-weight:600;line-height:20px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-planOwner{overflow:hidden;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-divider{height:1px;flex:0 0 auto;background:var(--dsw-alias-border-l2,#0000001a)}
+.qcp-block{display:flex;flex-direction:column;gap:8px;min-width:0}
+.qcp-blockTitle{color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;font-weight:600;line-height:16px;letter-spacing:.04em}
+.qcp-window{display:flex;flex-direction:column;gap:6px;min-width:0}
+/* Both figure rows WRAP rather than starve their own label. Measured in a 220px
+   center column, a label with min-width:0 shrank to nothing and the line read as
+   two bare numbers; wrapping instead pushes the figures onto a second line,
+   right-aligned by the auto margin, which still says what the numbers are. */
+.qcp-windowHead{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;min-width:0}
+.qcp-windowLabel{flex:1 1 auto;min-width:6em;overflow:hidden;color:var(--dsw-alias-label-secondary,#61666b);font-size:12px;line-height:18px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-windowValue{flex:0 0 auto;margin-left:auto;color:var(--dsw-alias-label-secondary,#61666b);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.qcp-windowPct{flex:0 0 auto;min-width:38px;color:var(--dsw-alias-label-primary,#0f1115);font-size:12px;font-weight:600;line-height:18px;font-variant-numeric:tabular-nums;text-align:right}
+.qcp-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.qcp-tile{box-sizing:border-box;display:flex;flex-direction:column;gap:2px;min-width:0;padding:8px 10px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,#0000001a);border-radius:8px}
+.qcp-tileLabel{color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px}
+.qcp-tileValue{overflow:hidden;color:var(--dsw-alias-label-primary,#0f1115);font-size:15px;font-weight:600;line-height:22px;font-variant-numeric:tabular-nums;text-overflow:ellipsis;white-space:nowrap}
+.qcp-tileValueSm{font-size:12px;line-height:18px}
+.qcp-tileSub{overflow:hidden;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-alert{box-sizing:border-box;display:flex;flex-direction:column;gap:4px;padding:10px 12px;color:var(--dsw-alias-state-error-primary,#ec1313);font-size:12px;line-height:18px;background:rgba(236,19,19,.06);border:1px solid var(--dsw-alias-state-error-primary,#ec1313);border-radius:12px}
+.qcp-alertDetail{color:var(--dsw-alias-label-secondary,#61666b);font-size:11px;line-height:16px;word-break:break-word}
+.qcp-note{color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px}
+.qcp-panelFoot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px}
+.qcp-link{color:var(--dsw-alias-label-secondary,#61666b);font-size:12px;line-height:18px;text-decoration:none;border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a)}
+.qcp-link:hover{color:var(--dsw-alias-label-primary,#0f1115);border-bottom-color:currentColor}
+
+@media (prefers-reduced-motion:reduce){.qcp-fill{transition:none}}
+`;
+function injectQuotaStyles(id = QUOTA_CSS_ID, css = QUOTA_CSS) {
+  if (typeof document === "undefined") return () => {
+  };
+  if (document.querySelector(`style[data-plugin-css="${id}"]`) !== null) return () => {
+  };
+  const tag = document.createElement("style");
+  tag.dataset.plugin = "dsh-provider-qoder";
+  tag.dataset.pluginCss = id;
+  tag.textContent = css;
+  document.head.appendChild(tag);
+  return () => {
+    tag.remove();
+  };
 }
 
 // src/index.ts
@@ -2129,22 +2130,33 @@ export {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DONE,
   PUBLIC_GATEWAY_URL,
-  QODER_SPEND_WINDOWS_MS,
+  QUOTA_CSS,
+  QUOTA_CSS_ID,
   QUOTA_ENDPOINT,
   QUOTA_TIMEOUT_MS,
   QoderAdapter,
-  SPEND_RETENTION_MS,
+  RING_CIRCUMFERENCE,
+  RING_RADIUS,
   apply,
   buildQoderAuthHeaders,
+  clampPercent,
   compareModelsForSelector,
+  daysUntil,
   exchangeJobToken,
   fetchQoderQuota,
   fetchUserInfo,
   formatContextWindow,
+  formatCredits,
+  formatDay,
+  formatMoment,
   formatPriceFactor,
+  formatShortDay,
+  formatYearSpan,
   getQoderCNDirectModel,
   getQoderCNFriendlyModelInfo,
   inject,
+  injectQuotaStyles,
+  joinParts,
   localizedText,
   mapFinishReason,
   mapUsage,
@@ -2158,17 +2170,14 @@ export {
   parseQoderSse,
   parseQuotaPool,
   parseQuotaSnapshot,
+  percentOf,
   qoderCnEndpoints,
   qoderEncodeBody,
-  readQoderSpend,
-  readSpendRecords,
-  readUsageAccounting,
-  recordQoderSpend,
   refreshJobToken,
   resolveAdapterOptions,
+  ringDashOffset,
   serializeMessages,
   serializeRequest,
-  spendLedgerPath,
-  summariseSpend,
-  systemTextOf
+  systemTextOf,
+  usedRatio
 };

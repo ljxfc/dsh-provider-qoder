@@ -51,9 +51,6 @@ export function toQuotaSnapshot(report: QoderUsageReport): QuotaSnapshotWire {
   if (report.organizationPool !== undefined) snapshot.organizationPool = report.organizationPool
   if (report.addOnPool !== undefined) snapshot.addOnPool = report.addOnPool
   if (report.upgradeUrl !== undefined) snapshot.upgradeUrl = report.upgradeUrl
-  // Locally measured rolling spend rides the same snapshot so one read fills
-  // both halves of the panel; absent means this Host recorded none.
-  if (report.spend !== undefined) snapshot.spend = report.spend
   return snapshot
 }
 

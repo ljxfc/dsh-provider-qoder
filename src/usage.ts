@@ -19,8 +19,6 @@
  * @module dsh-provider-qoder/usage
  */
 
-import type { QuotaSpendWire } from './usage-wire.ts'
-
 /** One credit pool as Qoder reports it. */
 export interface QoderQuotaPool {
   /** Whole size of the pool in `unit`. */
@@ -78,12 +76,6 @@ export interface QoderUsageReport {
   expiresAt: number
   /** Qoder's own upgrade link, when it sent one. */
   upgradeUrl?: string
-  /**
-   * Rolling spend measured on this machine. Qoder publishes no rolling window,
-   * so this member is not read from any endpoint: the adapter attaches it from
-   * the local ledger (`src/usage-ledger.ts`) after the server reads resolve.
-   */
-  spend?: QuotaSpendWire
 }
 
 /** Endpoints the quota reads need. */

@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { QUOTA_REMOTE_CONTRIBUTION } from '../usage-wire.ts'
+import { injectQuotaStyles } from '../quota-styles.ts'
 import { QoderProviderCard, type QoderCredentialFace, type QoderCredentialSnapshot } from './card.tsx'
 import { PANEL_LOCALE_NS, PANEL_TEXT_EN, PANEL_TEXT_ZH } from './copy.ts'
 import { QoderQuotaFooterEntry, QoderQuotaPanel, QUOTA_PANEL_ID, type QoderQuotaInjected } from './panel.tsx'
@@ -165,6 +166,12 @@ export function apply(ctx: Context): void {
   // language: declaring `PANEL_LOCALE_NS` on both registrations below is what
   // binds their `t` seat.
   ctx.effect(() => ctx.locale.register(PANEL_LOCALE_NS, { zh: PANEL_TEXT_ZH, en: PANEL_TEXT_EN }))
+
+  // The two quota surfaces are styled by one global sheet, installed on the
+  // first `apply` and released with this fiber so a disable or a reload leaves
+  // no orphan <style> behind. Injection is idempotent by sheet id, which is what
+  // makes the second and later applies no-ops instead of duplicate rules.
+  ctx.effect(() => injectQuotaStyles(), 'dsh-provider-qoder: quota styles')
 
   let settings: SettingsWriteRemote | undefined
   const quotaSettings = createQuotaSettingsFace(() => settings)

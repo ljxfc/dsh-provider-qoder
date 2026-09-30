@@ -38,6 +38,19 @@ test('ships the credential card, the quota surfaces, and the quota remote', asyn
   assert.match(client, /sidebar\.footer\.action/)
   assert.match(client, /qoder-quota-panel/)
   assert.match(client, /panel\.qoder/)
+  // The footer entry ships both of the shell's sidebar forms — the rail picks
+  // itself by the `wide` prop the slot hands it — so the 76px-wide card cannot
+  // come back to a 56px rail.
+  assert.match(client, /qcp-foot/)
+  assert.match(client, /qcp-rail/)
+  assert.match(client, /wide/)
+  // Both surfaces are painted by one injected sheet, keyed by id so a second
+  // apply cannot duplicate it.
+  assert.match(client, /QuotaSurfaces\.module\.css/)
+  assert.match(client, /data-plugin-css/)
+  // The rolling 5h/7d widget is gone rather than hidden: Qoder CN publishes no
+  // rolling window for the surfaces to fill.
+  assert.doesNotMatch(client, /spend/i)
   // The toggle that gates both the card and the background poll.
   assert.match(client, /showSidebarQuota/)
   // The Host receiver the browser reaches through the Typert Gateway.

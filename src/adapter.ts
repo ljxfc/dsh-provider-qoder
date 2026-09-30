@@ -37,8 +37,6 @@ import { fetchQoderQuota, type QoderUsageReport } from './usage.ts'
 import { serializeMessages, systemTextOf, transformTools, lastUserText } from './serialize.ts'
 import { parseQoderSse, DONE, parseEnvelope } from './sse.ts'
 import { translate } from './translate.ts'
-import type { QoderUsageAccounting } from './translate.ts'
-import { recordQoderSpend, readQoderSpend } from './usage-ledger.ts'
 import { compareModelsForSelector, modelDescription, modelSelectorLabel, parsePromotion } from './annotate.ts'
 import type { QoderLang, QoderModelPromotion } from './annotate.ts'
 
@@ -482,17 +480,11 @@ export class QoderAdapter extends LlmAdapter {
     const connection = this.config.options()
     const rawPat = await this.config.resolveApiKey(connection)
     const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal)
-    const report = await fetchQoderQuota(
+    return fetchQoderQuota(
       jobToken,
       { gateway: connection.endpoints.gateway, openapi: connection.endpoints.openapi },
       signal,
     )
-    // The monthly pools come from Qoder; the rolling windows are summed from
-    // this machine's own ledger, because Qoder publishes no such window. They
-    // travel together so one panel read shows both, and every surface labels
-    // which is which. A missing or unreadable ledger yields zeroed windows
-    // rather than an error: the server's numbers must not fail with it.
-    return { ...report, spend: await readQoderSpend() }
   }
 
   private async * request(
@@ -645,36 +637,7 @@ export class QoderAdapter extends LlmAdapter {
     const envelopes = parseQoderSse(response.body)
     // Feed the translator with decoded envelopes; the translator owns the
     // envelope → chunk mapping and the [DONE] flush.
-    yield* translate(
-      mapEnvelopes(envelopes, onComment),
-      reasoningEnabled,
-      // The gateway reports the request's credit charge on the same frame as
-      // its token counts. Recording it here — the one place that knows both the
-      // charge and the model that produced it — is what lets the quota surfaces
-      // report a rolling window Qoder itself never publishes.
-      (accounting) => { this.recordSpend(accounting, options.model) },
-    )
-  }
-
-  /**
-   * Record one request's credit charge in the rolling ledger.
-   *
-   * Only a completed, actually billed request is worth a ledger line: a
-   * `billable: false` response (the gateway's answer to an unknown model key)
-   * and a zero charge would each add a request to a window without adding any
-   * spend. Recording is fire-and-forget — the response has already succeeded by
-   * this point, so the ledger must never be able to fail it.
-   */
-  private recordSpend(accounting: QoderUsageAccounting, model: string): void {
-    if (accounting.billable === false) return
-    const credits = accounting.credits
-    if (credits === undefined || !(credits > 0)) return
-    void recordQoderSpend({
-      at: Date.now(),
-      credits,
-      ...accounting.originalCredits === undefined ? {} : { originalCredits: accounting.originalCredits },
-      model,
-    })
+    yield* translate(mapEnvelopes(envelopes, onComment), reasoningEnabled)
   }
 
   /** Exchange or refresh the job token for one PAT, caching per process. */

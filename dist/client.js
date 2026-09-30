@@ -58,10 +58,6 @@ function booleanField(source, key) {
   const value = source[key];
   return typeof value === "boolean" ? value : reject(key);
 }
-function arrayField(source, key) {
-  const value = source[key];
-  return Array.isArray(value) ? value : reject(key);
-}
 function parsePool(value, field) {
   const source = record(value, field);
   return {
@@ -72,22 +68,6 @@ function parsePool(value, field) {
     unit: stringField(source, "unit"),
     available: booleanField(source, "available")
   };
-}
-function parseSpend(value, field) {
-  const source = record(value, field);
-  const windows = arrayField(source, "windows").map((entry, index) => {
-    const window = record(entry, `${field}.windows[${String(index)}]`);
-    const parsed = {
-      spanMs: numberField(window, "spanMs"),
-      credits: numberField(window, "credits"),
-      requests: numberField(window, "requests")
-    };
-    if (window.resetsAt !== void 0) parsed.resetsAt = numberField(window, "resetsAt");
-    return parsed;
-  });
-  const spend = { windows };
-  if (source.updatedAt !== void 0) spend.updatedAt = numberField(source, "updatedAt");
-  return spend;
 }
 function parseQuotaSnapshot(value) {
   const source = record(value, "result");
@@ -115,9 +95,6 @@ function parseQuotaSnapshot(value) {
   if (source.upgradeUrl !== void 0) {
     snapshot.upgradeUrl = stringField(source, "upgradeUrl");
   }
-  if (source.spend !== void 0) {
-    snapshot.spend = parseSpend(source.spend, "spend");
-  }
   return snapshot;
 }
 var quotaSchema = { parse: parseQuotaSnapshot };
@@ -134,6 +111,122 @@ var QUOTA_REMOTE_CONTRIBUTION = {
   package: REMOTE_PACKAGE,
   descriptors: [QUOTA_DESCRIPTOR]
 };
+
+// src/quota-styles.ts
+var QUOTA_CSS_ID = "dsh-provider-qoder/QuotaSurfaces.module.css";
+var QUOTA_CSS = `
+/* ------------------------------------------------- sidebar footer entry */
+/* LOAD-BEARING (and the only unqualified rule here): the shell stacks this
+   list ABOVE the Settings seat and lays the list itself out as a flex ROW. An
+   occupant that declares a full-width line cannot shrink, so as a row it
+   overflows the column \u2014 measured on 0.2.0-rc.2 in the collapsed rail: the row
+   was 76px wide at x=-10.5 inside a 35px foot area, which is why the card used
+   to hang off the left edge of the sidebar. The ANCHOR is load-bearing too:
+   "footerActions" is not a stem this shell owns alone (dsh-client-ui-user-questions
+   renders a dialog's button row under the same stem, and an unqualified rule
+   would stack that row's side-by-side buttons on every page), so it is
+   qualified by "footArea", which the sidebar declares alone. The descendant
+   combinator survives a wrapper element appearing between the two. */
+[class*="_footArea"] [class*="_footerActions"]{flex-direction:column}
+
+/* The 56px rail: one icon button carrying the ring, matching the shell's own
+   rail geometry (its Settings seat measures 36px). */
+.qcp-rail{box-sizing:border-box;display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;width:36px;height:36px;margin:0 0 4px;padding:0;font:inherit;color:var(--dsw-alias-label-secondary,#61666b);cursor:pointer;background:0 0;border:1px solid transparent;border-radius:8px}
+.qcp-rail:hover{color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-interactive-bg-hover,#2631480f)}
+.qcp-rail:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#0f1115);outline-offset:1px}
+
+/* Expanded column: deliberately quiet \u2014 a surface beside Settings should read
+   as part of the column \u2014 with one hover step and a hairline border. */
+.qcp-foot{box-sizing:border-box;display:flex;flex:0 0 auto;flex-direction:column;gap:6px;width:100%;min-width:0;margin:0 0 4px;padding:8px;font:inherit;color:var(--dsw-alias-label-secondary,#61666b);text-align:left;cursor:pointer;background:0 0;border:1px solid transparent;border-radius:10px}
+.qcp-foot:hover{color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-interactive-bg-hover,#2631480f);border-color:var(--dsw-alias-border-l2,#0000001a)}
+.qcp-foot:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#0f1115);outline-offset:1px}
+.qcp-top{display:flex;align-items:center;gap:8px;min-width:0}
+.qcp-glyph{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;color:var(--dsw-alias-brand-primary,#0f1115)}
+.qcp-name{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--dsw-alias-label-primary,#0f1115);font-size:13px;font-weight:500;line-height:20px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-spacer{flex:1 1 auto;min-width:0}
+.qcp-badge{flex:0 0 auto;max-width:52%;overflow:hidden;padding:1px 8px;color:var(--dsw-alias-brand-primary,#0f1115);font-size:11px;font-weight:600;line-height:16px;text-overflow:ellipsis;white-space:nowrap;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border-radius:999px}
+.qcp-badgeWarn{color:var(--dsw-alias-state-error-primary,#ec1313)}
+
+/* One usage line: the label and its figures on a head row, the bar UNDER it \u2014
+   stacking the two lets the card show the credits without squeezing the bar
+   into whatever is left beside them. */
+.qcp-row{display:flex;flex-direction:column;gap:4px;min-width:0}
+.qcp-rowHead{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;min-width:0}
+.qcp-rowLabel{flex:1 1 auto;min-width:5em;overflow:hidden;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-rowAmount{flex:0 0 auto;margin-left:auto;color:var(--dsw-alias-label-secondary,#61666b);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.qcp-rowPct{flex:0 0 auto;width:34px;color:var(--dsw-alias-label-secondary,#61666b);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;text-align:right}
+/* display:block is load-bearing: the card's markup stays PHRASING content (it
+   renders inside a button), so these are spans \u2014 and an inline box ignores
+   width, which would collapse the fill to 0x0 and show no usage at all. */
+.qcp-bar{display:block;height:5px;overflow:hidden;background:rgba(127,127,127,.22);background:color-mix(in srgb,currentColor 14%,transparent);border-radius:999px}
+.qcp-barLg{display:block;height:8px;overflow:hidden;background:rgba(127,127,127,.22);background:color-mix(in srgb,currentColor 14%,transparent);border-radius:999px}
+.qcp-fill{display:block;height:100%;background:var(--dsw-alias-brand-primary,#0f1115);border-radius:999px;transition:width .3s ease}
+.qcp-fillWarn{background:var(--dsw-alias-state-error-primary,#ec1313)}
+.qcp-caption{display:block;min-width:0;overflow:hidden;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+
+/* ------------------------------------------------------------- the panel */
+.qcp-main{box-sizing:border-box;height:100%;overflow:auto}
+.qcp-inner{box-sizing:border-box;display:flex;flex-direction:column;gap:14px;max-width:720px;margin:0 auto;padding:24px 20px 40px}
+.qcp-head{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px}
+.qcp-headText{display:flex;flex-direction:column;gap:2px;min-width:0}
+.qcp-title{margin:0;color:var(--dsw-alias-label-primary,#0f1115);font-size:18px;font-weight:600;line-height:26px}
+.qcp-sub{color:var(--dsw-alias-label-tertiary,#81858c);font-size:12px;line-height:18px}
+.qcp-actions{display:flex;flex:0 0 auto;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px;margin-left:auto}
+.qcp-meta{color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.qcp-button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 12px;font:inherit;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#61666b);white-space:nowrap;cursor:pointer;background:0 0;border:1px solid var(--dsw-alias-border-l2,#0000001a);border-radius:999px}
+.qcp-button:hover:not(:disabled){color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-interactive-bg-hover,#2631480f)}
+.qcp-button:disabled{cursor:default;opacity:.5}
+.qcp-button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#0f1115);outline-offset:1px}
+.qcp-iconButton{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;font:inherit;font-size:16px;line-height:1;color:var(--dsw-alias-label-secondary,#61666b);cursor:pointer;background:0 0;border:1px solid transparent;border-radius:8px}
+.qcp-iconButton:hover{color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-interactive-bg-hover,#2631480f)}
+.qcp-iconButton:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#0f1115);outline-offset:1px}
+.qcp-card{box-sizing:border-box;display:flex;flex-direction:column;gap:14px;padding:16px 18px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,#0000001a);border-radius:14px}
+.qcp-identity{display:flex;align-items:center;gap:10px;min-width:0}
+.qcp-avatar{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;width:28px;height:28px;color:var(--dsw-alias-brand-primary,#0f1115);font-size:12px;font-weight:600;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border-radius:50%}
+.qcp-idText{display:flex;flex-direction:column;gap:1px;min-width:0}
+.qcp-planName{overflow:hidden;color:var(--dsw-alias-label-primary,#0f1115);font-size:13px;font-weight:600;line-height:20px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-planOwner{overflow:hidden;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-divider{height:1px;flex:0 0 auto;background:var(--dsw-alias-border-l2,#0000001a)}
+.qcp-block{display:flex;flex-direction:column;gap:8px;min-width:0}
+.qcp-blockTitle{color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;font-weight:600;line-height:16px;letter-spacing:.04em}
+.qcp-window{display:flex;flex-direction:column;gap:6px;min-width:0}
+/* Both figure rows WRAP rather than starve their own label. Measured in a 220px
+   center column, a label with min-width:0 shrank to nothing and the line read as
+   two bare numbers; wrapping instead pushes the figures onto a second line,
+   right-aligned by the auto margin, which still says what the numbers are. */
+.qcp-windowHead{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;min-width:0}
+.qcp-windowLabel{flex:1 1 auto;min-width:6em;overflow:hidden;color:var(--dsw-alias-label-secondary,#61666b);font-size:12px;line-height:18px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-windowValue{flex:0 0 auto;margin-left:auto;color:var(--dsw-alias-label-secondary,#61666b);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.qcp-windowPct{flex:0 0 auto;min-width:38px;color:var(--dsw-alias-label-primary,#0f1115);font-size:12px;font-weight:600;line-height:18px;font-variant-numeric:tabular-nums;text-align:right}
+.qcp-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.qcp-tile{box-sizing:border-box;display:flex;flex-direction:column;gap:2px;min-width:0;padding:8px 10px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,#0000001a);border-radius:8px}
+.qcp-tileLabel{color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px}
+.qcp-tileValue{overflow:hidden;color:var(--dsw-alias-label-primary,#0f1115);font-size:15px;font-weight:600;line-height:22px;font-variant-numeric:tabular-nums;text-overflow:ellipsis;white-space:nowrap}
+.qcp-tileValueSm{font-size:12px;line-height:18px}
+.qcp-tileSub{overflow:hidden;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+.qcp-alert{box-sizing:border-box;display:flex;flex-direction:column;gap:4px;padding:10px 12px;color:var(--dsw-alias-state-error-primary,#ec1313);font-size:12px;line-height:18px;background:rgba(236,19,19,.06);border:1px solid var(--dsw-alias-state-error-primary,#ec1313);border-radius:12px}
+.qcp-alertDetail{color:var(--dsw-alias-label-secondary,#61666b);font-size:11px;line-height:16px;word-break:break-word}
+.qcp-note{color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;line-height:16px}
+.qcp-panelFoot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px}
+.qcp-link{color:var(--dsw-alias-label-secondary,#61666b);font-size:12px;line-height:18px;text-decoration:none;border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a)}
+.qcp-link:hover{color:var(--dsw-alias-label-primary,#0f1115);border-bottom-color:currentColor}
+
+@media (prefers-reduced-motion:reduce){.qcp-fill{transition:none}}
+`;
+function injectQuotaStyles(id = QUOTA_CSS_ID, css = QUOTA_CSS) {
+  if (typeof document === "undefined") return () => {
+  };
+  if (document.querySelector(`style[data-plugin-css="${id}"]`) !== null) return () => {
+  };
+  const tag = document.createElement("style");
+  tag.dataset.plugin = "dsh-provider-qoder";
+  tag.dataset.pluginCss = id;
+  tag.textContent = css;
+  document.head.appendChild(tag);
+  return () => {
+    tag.remove();
+  };
+}
 
 // src/client/card.tsx
 var React = __toESM(require("react"), 1);
@@ -240,9 +333,10 @@ function QoderProviderCard(props) {
 var PANEL_LOCALE_NS = "panel.qoder";
 var PANEL_TEXT_ZH = {
   lang: "zh",
-  cardTitle: "\u989D\u5EA6",
+  cardName: "Qoder CN",
   cardHint: "\u67E5\u770B Qoder CN \u5957\u9910\u4E0E\u989D\u5EA6",
   panelTitle: "Qoder CN \u5957\u9910\u4E0E\u989D\u5EA6",
+  panelSubtitle: "\u6309\u8BA1\u8D39\u5468\u671F\u7EDF\u8BA1\u7684\u79EF\u5206\u7528\u91CF",
   close: "\u8FD4\u56DE\u4F1A\u8BDD",
   closeHint: "\u5173\u95ED\u6B64\u9762\u677F\u5E76\u8FD4\u56DE\u5F53\u524D\u4F1A\u8BDD",
   refresh: "\u5237\u65B0",
@@ -250,45 +344,35 @@ var PANEL_TEXT_ZH = {
   unavailable: "\u5F53\u524D profile \u672A\u6302\u8F7D\u989D\u5EA6\u670D\u52A1\u3002",
   notConfigured: "\u5C1A\u672A\u914D\u7F6E PAT\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u989D\u5EA6\u3002",
   error: "\u989D\u5EA6\u8BFB\u53D6\u5931\u8D25",
-  plan: "\u5957\u9910",
-  account: "\u8D26\u6237\u7C7B\u578B",
-  organization: "\u7EC4\u7EC7",
-  role: "\u89D2\u8272",
-  billingCycle: "\u8BA1\u8D39\u5468\u671F",
+  usageBlock: "\u989D\u5EA6",
   personalPool: "\u4E2A\u4EBA\u5957\u9910\u989D\u5EA6",
+  noPersonalPool: "\u8BE5\u8D26\u6237\u6CA1\u6709\u4E2A\u4EBA\u5957\u9910\u989D\u5EA6\u3002",
   organizationPool: "\u7EC4\u7EC7\u8D44\u6E90\u5305",
+  orgPoolDormant: "\u7EC4\u7EC7\u8D44\u6E90\u5305\u5F53\u524D\u672A\u542F\u7528\u3002",
   addOnPool: "\u8D2D\u4E70 / \u8D60\u9001\u989D\u5EA6",
+  billingCycle: "\u8BA1\u8D39\u5468\u671F",
   used: "\u5DF2\u7528",
   remaining: "\u5269\u4F59",
+  limit: "\u4E0A\u9650",
   resetAt: "\u91CD\u7F6E\u65F6\u95F4",
   noDeadline: "\u672A\u63D0\u4F9B",
-  dormant: "\u5F53\u524D\u672A\u542F\u7528",
+  daysLeftSuffix: "\u5929\u540E",
   exceeded: "\u989D\u5EA6\u5DF2\u7528\u5C3D",
+  exceededShort: "\u5DF2\u7528\u5C3D",
+  exceededHint: "\u672C\u8BA1\u8D39\u5468\u671F\u7684\u79EF\u5206\u5DF2\u7528\u5B8C\uFF0C\u65B0\u7684\u8BF7\u6C42\u53EF\u80FD\u88AB\u62D2\u7EDD\u3002",
   upgrade: "\u5347\u7EA7\u5957\u9910",
   refreshedAt: "\u66F4\u65B0\u4E8E",
   never: "\u5C1A\u672A\u8BFB\u53D6",
   settingsToggle: "\u5728\u4FA7\u8FB9\u680F\u663E\u793A\u989D\u5EA6\u5361\u7247",
   settingsToggleHint: "\u9ED8\u8BA4\u5173\u95ED\uFF1B\u5173\u95ED\u65F6\u5DE6\u4FA7\u680F\u4E0D\u6E32\u67D3\u5361\u7247\uFF0C\u4E5F\u4E0D\u4F1A\u540E\u53F0\u5237\u65B0\u989D\u5EA6\u3002",
-  settingsToggleFailed: "\u5F00\u5173\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002",
-  spendTitle: "\u6EDA\u52A8\u7528\u91CF",
-  spendHint: "\u672C\u5730\u7EDF\u8BA1\uFF1A\u7531\u672C\u673A\u5DF2\u5B8C\u6210\u7684\u8BF7\u6C42\u7D2F\u8BA1\uFF0CQoder \u672C\u8EAB\u4E0D\u63D0\u4F9B 5 \u5C0F\u65F6 / \u6BCF\u5468\u7A97\u53E3\uFF1B\u6708\u5EA6\u989D\u5EA6\u4EE5\u4E0A\u65B9\u5957\u9910\u6C60\u4E3A\u51C6\u3002",
-  spendNever: "\u5C1A\u65E0\u672C\u5730\u8BB0\u5F55",
-  spendRequests: "\u8BF7\u6C42",
-  creditsUnit: "\u79EF\u5206",
-  window5h: "5 \u5C0F\u65F6",
-  window24h: "24 \u5C0F\u65F6",
-  window7d: "7 \u5929",
-  window5hShort: "5h",
-  window24hShort: "24h",
-  window7dShort: "7d",
-  hoursUnit: "\u5C0F\u65F6",
-  daysUnit: "\u5929"
+  settingsToggleFailed: "\u5F00\u5173\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002"
 };
 var PANEL_TEXT_EN = {
   lang: "en",
-  cardTitle: "Usage",
+  cardName: "Qoder CN",
   cardHint: "Qoder CN plan and quota",
   panelTitle: "Qoder CN plan & quota",
+  panelSubtitle: "Credits used in the current billing cycle",
   close: "Back to conversation",
   closeHint: "Close this panel and return to the current conversation",
   refresh: "Refresh",
@@ -296,57 +380,29 @@ var PANEL_TEXT_EN = {
   unavailable: "The quota service is not mounted in this profile.",
   notConfigured: "No PAT is configured yet, so quota cannot be read.",
   error: "Could not read the quota",
-  plan: "Plan",
-  account: "Account",
-  organization: "Organization",
-  role: "Role",
-  billingCycle: "Billing cycle",
+  usageBlock: "Usage",
   personalPool: "Personal plan credits",
+  noPersonalPool: "This account has no personal plan credits.",
   organizationPool: "Organization package",
+  orgPoolDormant: "The organization package is currently not drawn on.",
   addOnPool: "Purchased / gifted credits",
+  billingCycle: "Billing cycle",
   used: "Used",
   remaining: "Remaining",
+  limit: "Limit",
   resetAt: "Resets",
   noDeadline: "Not reported",
-  dormant: "Not currently drawn on",
+  daysLeftSuffix: "days left",
   exceeded: "Quota exhausted",
+  exceededShort: "Exhausted",
+  exceededHint: "This billing cycle is spent; new requests may be rejected.",
   upgrade: "Upgrade plan",
   refreshedAt: "Updated",
   never: "Never",
   settingsToggle: "Show the quota card in the sidebar",
   settingsToggleHint: "Off by default; while off the sidebar renders no card and no background quota refresh runs.",
-  settingsToggleFailed: "The toggle could not be stored. Try again.",
-  spendTitle: "Rolling usage",
-  spendHint: "Measured locally from completed requests on this machine \u2014 Qoder reports no five-hour or weekly window itself; the monthly pools above stay authoritative.",
-  spendNever: "No local records yet",
-  spendRequests: "Requests",
-  creditsUnit: "credits",
-  window5h: "5 hours",
-  window24h: "24 hours",
-  window7d: "7 days",
-  window5hShort: "5h",
-  window24hShort: "24h",
-  window7dShort: "7d",
-  hoursUnit: "hours",
-  daysUnit: "days"
+  settingsToggleFailed: "The toggle could not be stored. Try again."
 };
-var HOUR_MS = 60 * 60 * 1e3;
-function spendWindowLabel(spanMs, t, compact = false) {
-  switch (spanMs) {
-    case 5 * HOUR_MS:
-      return compact ? t.window5hShort : t.window5h;
-    case 24 * HOUR_MS:
-      return compact ? t.window24hShort : t.window24h;
-    case 7 * 24 * HOUR_MS:
-      return compact ? t.window7dShort : t.window7d;
-    default:
-      break;
-  }
-  const days = spanMs / (24 * HOUR_MS);
-  if (Number.isInteger(days) && days >= 1) return `${String(days)} ${t.daysUnit}`;
-  const hours = Math.max(1, Math.round(spanMs / HOUR_MS));
-  return `${String(hours)} ${t.hoursUnit}`;
-}
 function qoderPanelText(t) {
   const key = t("lang");
   return key === "zh" ? PANEL_TEXT_ZH : PANEL_TEXT_EN;
@@ -355,18 +411,36 @@ function qoderPanelText(t) {
 // src/client/panel.tsx
 var React2 = __toESM(require("react"), 1);
 var import_react2 = require("react");
-var QUOTA_PANEL_ID = "qoder-quota-panel";
-function formatCredits(value) {
-  const rounded = Math.round(value * 100) / 100;
-  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+
+// src/quota-view.ts
+var RING_RADIUS = 7.25;
+var RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+function clampPercent(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, value));
 }
-function formatRatio(ratio) {
-  return `${String(Math.round(Math.max(0, Math.min(1, ratio)) * 100))}%`;
+function percentOf(ratio) {
+  return Math.round(clampPercent(ratio * 100));
+}
+function ringDashOffset(percent, circumference = RING_CIRCUMFERENCE) {
+  return Math.round(circumference * (1 - clampPercent(percent) / 100) * 1e3) / 1e3;
+}
+function usedRatio(used, total, fallback = 0) {
+  const usable = Number.isFinite(used) && Number.isFinite(total) && total > 0 ? used / total : fallback;
+  if (!Number.isFinite(usable)) return 0;
+  return Math.min(1, Math.max(0, usable));
+}
+function formatCredits(value) {
+  if (!Number.isFinite(value)) return "\u2014";
+  return String(Math.round(value * 100) / 100);
+}
+function locale(lang) {
+  return lang === "zh" ? "zh-CN" : "en-US";
 }
 function formatMoment(ms, lang) {
   if (ms === void 0 || !Number.isFinite(ms)) return void 0;
   try {
-    return new Date(ms).toLocaleString(lang === "zh" ? "zh-CN" : "en-US", {
+    return new Date(ms).toLocaleString(locale(lang), {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -377,175 +451,43 @@ function formatMoment(ms, lang) {
     return new Date(ms).toISOString();
   }
 }
-function QuotaBar(props) {
-  const percent = Math.round(Math.max(0, Math.min(1, props.ratio)) * 100);
-  return /* @__PURE__ */ React2.createElement(
-    "div",
-    {
-      role: "progressbar",
-      "aria-label": props.label,
-      "aria-valuemin": 0,
-      "aria-valuemax": 100,
-      "aria-valuenow": percent,
-      style: { height: "6px", borderRadius: "3px", background: "rgba(127,127,127,0.28)", overflow: "hidden" }
-    },
-    /* @__PURE__ */ React2.createElement("div", { style: { width: `${String(percent)}%`, height: "100%", background: percent >= 100 ? "#d9534f" : "currentColor" } })
-  );
-}
-function QuotaRow(props) {
-  return /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px" } }, /* @__PURE__ */ React2.createElement("span", { style: { opacity: 0.7 } }, props.label), /* @__PURE__ */ React2.createElement("span", null, props.value));
-}
-function QuotaPool(props) {
-  const { t, pool } = props;
-  const ratio = pool.total > 0 ? pool.used / pool.total : pool.percentage;
-  const reset = formatMoment(props.expiresAt, t.lang) ?? t.noDeadline;
-  return /* @__PURE__ */ React2.createElement("div", { style: { display: "grid", gap: "6px", padding: "10px 12px", border: "1px solid rgba(127,127,127,0.3)", borderRadius: "8px" } }, /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px" } }, /* @__PURE__ */ React2.createElement("strong", null, props.title), props.dormant === true ? /* @__PURE__ */ React2.createElement("em", null, t.dormant) : /* @__PURE__ */ React2.createElement("span", null, formatRatio(ratio))), /* @__PURE__ */ React2.createElement(QuotaBar, { ratio, label: props.title }), /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.used, value: `${formatCredits(pool.used)} / ${formatCredits(pool.total)} ${pool.unit}` }), /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.remaining, value: `${formatCredits(pool.remaining)} ${pool.unit}` }), /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.resetAt, value: reset }));
-}
-function useView(props) {
-  const t = qoderPanelText(props.t ?? ((key) => PANEL_TEXT_EN[key] ?? key));
-  const snapshot = props.useQuota?.((state) => state) ?? { status: "idle" };
-  return { t, snapshot, report: snapshot.report };
-}
-function windowExtremes(spend) {
-  let short;
-  let long;
-  for (const window of spend.windows) {
-    if (short === void 0 || window.spanMs < short.spanMs) short = window;
-    if (long === void 0 || window.spanMs > long.spanMs) long = window;
+function formatDay(ms, lang) {
+  if (ms === void 0 || !Number.isFinite(ms)) return void 0;
+  try {
+    return new Date(ms).toLocaleDateString(locale(lang), { year: "numeric", month: "2-digit", day: "2-digit" });
+  } catch {
+    return new Date(ms).toISOString().slice(0, 10);
   }
-  return {
-    ...short === void 0 ? {} : { short },
-    ...long === void 0 ? {} : { long }
-  };
 }
-function spendBrief(spend, t) {
-  const { short, long } = windowExtremes(spend);
-  if (short === void 0 || long === void 0) return void 0;
-  const windows = short.spanMs === long.spanMs ? [short] : [short, long];
-  const parts = windows.map(
-    (window) => `${spendWindowLabel(window.spanMs, t, true)} ${formatCredits(window.credits)}`
-  );
-  return `${parts.join(" \xB7 ")} ${t.creditsUnit}`;
+function formatShortDay(ms, lang) {
+  if (ms === void 0 || !Number.isFinite(ms)) return void 0;
+  try {
+    return new Date(ms).toLocaleDateString(locale(lang), { month: "2-digit", day: "2-digit" });
+  } catch {
+    return new Date(ms).toISOString().slice(5, 10);
+  }
 }
-function SpendSection(props) {
-  const { t, spend } = props;
-  return /* @__PURE__ */ React2.createElement(
-    "section",
-    {
-      "data-qoder-spend": "true",
-      style: { display: "grid", gap: "8px", padding: "10px 12px", border: "1px solid rgba(127,127,127,0.3)", borderRadius: "8px" }
-    },
-    /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px" } }, /* @__PURE__ */ React2.createElement("strong", null, t.spendTitle), /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.75 } }, spend.updatedAt === void 0 ? t.spendNever : formatMoment(spend.updatedAt, t.lang) ?? t.spendNever)),
-    spend.windows.map((window) => /* @__PURE__ */ React2.createElement("div", { key: window.spanMs, style: { display: "grid", gap: "2px" } }, /* @__PURE__ */ React2.createElement(
-      QuotaRow,
-      {
-        label: spendWindowLabel(window.spanMs, t),
-        value: `${formatCredits(window.credits)} ${t.creditsUnit}`
-      }
-    ), /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px", opacity: 0.7 } }, /* @__PURE__ */ React2.createElement("small", null, `${t.spendRequests} ${String(window.requests)}`), window.resetsAt === void 0 ? null : /* @__PURE__ */ React2.createElement("small", null, `${t.resetAt} ${formatMoment(window.resetsAt, t.lang) ?? t.noDeadline}`)))),
-    /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.7 } }, t.spendHint)
-  );
+function formatYearSpan(start, end) {
+  const from = yearOf(start);
+  if (from === void 0) return void 0;
+  const to = yearOf(end);
+  return to === void 0 || to === from ? from : `${from} \u2192 ${to}`;
 }
-function QoderQuotaFooterEntry(props) {
-  const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
-  const { t, snapshot, report } = useView(props);
-  const startAutoRefresh = props.startAutoRefresh;
-  (0, import_react2.useEffect)(() => {
-    if (!enabled || startAutoRefresh === void 0) return void 0;
-    return startAutoRefresh();
-  }, [enabled, startAutoRefresh]);
-  if (!enabled) return null;
-  const summary = report === void 0 ? snapshot.status === "loading" ? t.loading : t.error : `${report.planTierName} \xB7 ${formatRatio(report.totalPercentage)}`;
-  const brief = report?.spend === void 0 ? void 0 : spendBrief(report.spend, t);
-  return /* @__PURE__ */ React2.createElement(
-    "button",
-    {
-      type: "button",
-      "data-qoder-quota-card": "true",
-      title: t.cardHint,
-      onClick: () => {
-        props.open?.();
-      },
-      style: {
-        display: "grid",
-        gap: "4px",
-        width: "100%",
-        padding: "8px 10px",
-        border: "1px solid rgba(127,127,127,0.35)",
-        borderRadius: "8px",
-        background: "transparent",
-        color: "inherit",
-        cursor: "pointer",
-        font: "inherit",
-        textAlign: "left"
-      }
-    },
-    /* @__PURE__ */ React2.createElement("span", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" } }, /* @__PURE__ */ React2.createElement("span", null, t.cardTitle), /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.75 } }, summary)),
-    brief === void 0 ? null : /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.6 } }, brief)
-  );
+function yearOf(ms) {
+  if (ms === void 0 || !Number.isFinite(ms)) return void 0;
+  return String(new Date(ms).getFullYear());
 }
-function QoderQuotaPanel(props) {
-  const { t, snapshot, report } = useView(props);
-  const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
-  const startAutoRefresh = props.startAutoRefresh;
-  (0, import_react2.useEffect)(() => {
-    if (startAutoRefresh === void 0) return void 0;
-    return startAutoRefresh();
-  }, [startAutoRefresh]);
-  const refreshed = snapshot.fetchedAt === void 0 ? t.never : formatMoment(snapshot.fetchedAt, t.lang) ?? t.never;
-  const personal = report?.personal;
-  const organization = report?.organizationPool;
-  const organizationActive = organization !== void 0 && organization.available !== false;
-  return /* @__PURE__ */ React2.createElement(
-    "section",
-    {
-      "data-qoder-quota-panel": "true",
-      style: { display: "grid", gap: "12px", alignContent: "start", padding: "16px 20px", overflow: "auto", height: "100%" }
-    },
-    /* @__PURE__ */ React2.createElement("header", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" } }, /* @__PURE__ */ React2.createElement("h2", { style: { margin: 0, fontSize: "1.1em" } }, t.panelTitle), /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px" } }, /* @__PURE__ */ React2.createElement("button", { type: "button", onClick: () => {
-      props.refresh?.();
-    }, disabled: snapshot.status === "loading" }, snapshot.status === "loading" ? t.loading : t.refresh), /* @__PURE__ */ React2.createElement(
-      "button",
-      {
-        type: "button",
-        "aria-label": t.close,
-        title: t.closeHint,
-        onClick: () => {
-          props.close?.();
-        },
-        style: { border: "none", background: "transparent", color: "inherit", cursor: "pointer", fontSize: "1.2em", lineHeight: 1 }
-      },
-      /* @__PURE__ */ React2.createElement("span", { "aria-hidden": "true" }, "\xD7")
-    ))),
-    report?.isQuotaExceeded === true ? /* @__PURE__ */ React2.createElement("div", { role: "alert", style: { padding: "8px 12px", border: "1px solid #d9534f", borderRadius: "8px" } }, t.exceeded) : null,
-    snapshot.status === "error" ? /* @__PURE__ */ React2.createElement("div", { role: "alert", style: { display: "grid", gap: "6px" } }, /* @__PURE__ */ React2.createElement("span", null, t.error), snapshot.error !== void 0 ? /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.7 } }, snapshot.error) : null) : null,
-    report === void 0 ? null : /* @__PURE__ */ React2.createElement("div", { style: { display: "grid", gap: "6px" } }, /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.plan, value: report.planTierName }), /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.account, value: report.userType }), report.organizationName === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.organization, value: report.organizationName }), report.organizationRole === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaRow, { label: t.role, value: report.organizationRole }), /* @__PURE__ */ React2.createElement(
-      QuotaRow,
-      {
-        label: t.billingCycle,
-        value: `${formatMoment(report.periodStart, t.lang) ?? t.noDeadline} \u2192 ${formatMoment(report.periodEnd, t.lang) ?? t.noDeadline}`
-      }
-    )),
-    personal === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaPool, { t, title: t.personalPool, pool: personal, expiresAt: report?.expiresAt }),
-    organization === void 0 ? null : /* @__PURE__ */ React2.createElement(
-      QuotaPool,
-      {
-        t,
-        title: t.organizationPool,
-        pool: organization,
-        expiresAt: report?.expiresAt,
-        ...organizationActive ? {} : { dormant: true }
-      }
-    ),
-    report?.addOnPool === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaPool, { t, title: t.addOnPool, pool: report.addOnPool, expiresAt: report.expiresAt }),
-    report?.spend === void 0 ? null : /* @__PURE__ */ React2.createElement(SpendSection, { t, spend: report.spend }),
-    /* @__PURE__ */ React2.createElement("footer", { style: { display: "flex", justifyContent: "space-between", gap: "12px", opacity: 0.7 } }, /* @__PURE__ */ React2.createElement("small", null, `${t.refreshedAt} ${refreshed}`), report?.upgradeUrl === void 0 ? null : /* @__PURE__ */ React2.createElement("a", { href: report.upgradeUrl, target: "_blank", rel: "noreferrer" }, t.upgrade)),
-    enabled ? null : /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.7 } }, t.settingsToggleHint)
-  );
+function daysUntil(until, now) {
+  if (until === void 0 || !Number.isFinite(until) || until <= now) return void 0;
+  return Math.ceil((until - now) / 864e5);
+}
+function joinParts(parts, separator = " \xB7 ") {
+  return parts.filter((part) => part !== void 0 && part !== "").join(separator);
 }
 
 // src/client/quota.ts
 var QUOTA_AUTO_REFRESH_MS = 12e4;
+var QUOTA_REMOTE_UNMOUNTED_ERROR = "the qoder/quota remote is not mounted";
 function createQuotaController(resolve) {
   let snapshot = { status: "idle" };
   let inFlight;
@@ -563,7 +505,7 @@ function createQuotaController(resolve) {
       if (ticket !== generation) return;
       snapshot = {
         status: "error",
-        error: "the qoder/quota remote is not mounted",
+        error: QUOTA_REMOTE_UNMOUNTED_ERROR,
         ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
       };
       publish();
@@ -632,6 +574,209 @@ var references = 0;
 var ticketSeq = 0;
 var activeTicket;
 var handle;
+
+// src/client/panel.tsx
+var QUOTA_PANEL_ID = "qoder-quota-panel";
+function QuotaRing(props) {
+  return /* @__PURE__ */ React2.createElement("span", { className: "qcp-glyph", "aria-hidden": "true" }, /* @__PURE__ */ React2.createElement("svg", { viewBox: "0 0 20 20", width: props.size, height: props.size, focusable: "false" }, /* @__PURE__ */ React2.createElement("circle", { cx: 10, cy: 10, r: RING_RADIUS, fill: "none", stroke: "currentColor", strokeWidth: 1.5, opacity: 0.4 }), /* @__PURE__ */ React2.createElement(
+    "circle",
+    {
+      cx: 10,
+      cy: 10,
+      r: RING_RADIUS,
+      fill: "none",
+      stroke: props.warn ? "var(--dsw-alias-state-error-primary, #ec1313)" : "currentColor",
+      strokeWidth: 2.5,
+      strokeLinecap: "round",
+      strokeDasharray: RING_CIRCUMFERENCE,
+      strokeDashoffset: ringDashOffset(props.percent),
+      transform: "rotate(-90 10 10)"
+    }
+  )));
+}
+function QuotaBar(props) {
+  return /* @__PURE__ */ React2.createElement(
+    "span",
+    {
+      className: props.large === true ? "qcp-barLg" : "qcp-bar",
+      role: "progressbar",
+      "aria-label": props.label,
+      "aria-valuemin": 0,
+      "aria-valuemax": 100,
+      "aria-valuenow": props.percent
+    },
+    /* @__PURE__ */ React2.createElement("span", { className: props.warn ? "qcp-fill qcp-fillWarn" : "qcp-fill", style: { width: `${String(props.percent)}%` } })
+  );
+}
+function QuotaWindow(props) {
+  const { t, pool } = props;
+  const percent = percentOf(usedRatio(pool.used, pool.total, pool.percentage));
+  return /* @__PURE__ */ React2.createElement("div", { className: "qcp-window" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-windowHead" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-windowLabel" }, props.label), /* @__PURE__ */ React2.createElement("span", { className: "qcp-windowValue" }, `${formatCredits(pool.used)} / ${formatCredits(pool.total)} ${pool.unit}`), /* @__PURE__ */ React2.createElement("span", { className: "qcp-windowPct" }, `${String(percent)}%`)), /* @__PURE__ */ React2.createElement(QuotaBar, { large: true, percent, warn: props.warn, label: props.label }), /* @__PURE__ */ React2.createElement("span", { className: "qcp-caption" }, `${t.resetAt} ${formatMoment(props.expiresAt, t.lang) ?? t.noDeadline}`));
+}
+function QuotaTile(props) {
+  return /* @__PURE__ */ React2.createElement("div", { className: "qcp-tile" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-tileLabel" }, props.label), /* @__PURE__ */ React2.createElement("span", { className: props.small === true ? "qcp-tileValue qcp-tileValueSm" : "qcp-tileValue" }, props.value), props.sub === void 0 ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-tileSub", title: props.sub }, props.sub));
+}
+function useView(props) {
+  const t = qoderPanelText(props.t ?? ((key) => PANEL_TEXT_EN[key] ?? key));
+  const snapshot = props.useQuota?.((state) => state) ?? { status: "idle" };
+  return { t, snapshot, report: snapshot.report };
+}
+function statusHeadline(t, error) {
+  if (error === QUOTA_REMOTE_UNMOUNTED_ERROR) return { title: t.unavailable };
+  if (/no PAT|personal access token/i.test(error)) return { title: t.notConfigured, detail: error };
+  return { title: t.error, detail: error };
+}
+function headlineOf(report) {
+  if (report?.personal !== void 0) return { pool: report.personal, label: "personal" };
+  if (report?.addOnPool !== void 0) return { pool: report.addOnPool, label: "addOn" };
+  return void 0;
+}
+function QoderQuotaFooterEntry(props) {
+  const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
+  const { t, snapshot, report } = useView(props);
+  const startAutoRefresh = props.startAutoRefresh;
+  (0, import_react2.useEffect)(() => {
+    if (!enabled || startAutoRefresh === void 0) return void 0;
+    return startAutoRefresh();
+  }, [enabled, startAutoRefresh]);
+  if (!enabled) return null;
+  const headline = headlineOf(report);
+  const percent = headline === void 0 ? 0 : percentOf(usedRatio(headline.pool.used, headline.pool.total, headline.pool.percentage));
+  const warn = report?.isQuotaExceeded === true || percent >= 100;
+  const open = () => {
+    props.open?.();
+  };
+  if (props.wide === false) {
+    return /* @__PURE__ */ React2.createElement(
+      "button",
+      {
+        type: "button",
+        className: "qcp-rail",
+        "data-qoder-quota-card": "true",
+        "aria-label": t.cardHint,
+        title: t.cardHint,
+        onClick: open
+      },
+      /* @__PURE__ */ React2.createElement(QuotaRing, { percent, warn, size: 18 })
+    );
+  }
+  const badge = report?.planTierName;
+  return /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      type: "button",
+      className: "qcp-foot",
+      "data-qoder-quota-card": "true",
+      "aria-label": t.cardHint,
+      title: t.cardHint,
+      onClick: open
+    },
+    /* @__PURE__ */ React2.createElement("span", { className: "qcp-top" }, /* @__PURE__ */ React2.createElement(QuotaRing, { percent, warn, size: 16 }), /* @__PURE__ */ React2.createElement("span", { className: "qcp-name" }, t.cardName), /* @__PURE__ */ React2.createElement("span", { className: "qcp-spacer" }), warn ? /* @__PURE__ */ React2.createElement("span", { className: "qcp-badge qcp-badgeWarn" }, t.exceededShort) : badge === void 0 ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-badge" }, badge)),
+    headline === void 0 ? /* @__PURE__ */ React2.createElement("span", { className: "qcp-caption" }, snapshot.status === "error" ? t.error : t.loading) : /* @__PURE__ */ React2.createElement("span", { className: "qcp-row" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-rowHead" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-rowLabel" }, headline.label === "personal" ? t.personalPool : t.addOnPool), /* @__PURE__ */ React2.createElement("span", { className: "qcp-rowAmount" }, `${formatCredits(headline.pool.used)} / ${formatCredits(headline.pool.total)}`), /* @__PURE__ */ React2.createElement("span", { className: "qcp-rowPct" }, `${String(percent)}%`)), /* @__PURE__ */ React2.createElement(QuotaBar, { percent, warn, label: t.personalPool }), /* @__PURE__ */ React2.createElement("span", { className: "qcp-caption" }, `${t.resetAt} ${formatMoment(report?.expiresAt, t.lang) ?? t.noDeadline}`))
+  );
+}
+function QoderQuotaPanel(props) {
+  const { t, snapshot, report } = useView(props);
+  const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
+  const startAutoRefresh = props.startAutoRefresh;
+  (0, import_react2.useEffect)(() => {
+    if (startAutoRefresh === void 0) return void 0;
+    return startAutoRefresh();
+  }, [startAutoRefresh]);
+  const now = Date.now();
+  const refreshed = snapshot.fetchedAt === void 0 ? t.never : formatMoment(snapshot.fetchedAt, t.lang) ?? t.never;
+  const personal = report?.personal;
+  const organization = report?.organizationPool;
+  const organizationActive = organization !== void 0 && organization.available !== false;
+  const percent = personal === void 0 ? percentOf(report?.totalPercentage ?? 0) : percentOf(usedRatio(personal.used, personal.total, personal.percentage));
+  const exceeded = report?.isQuotaExceeded === true || personal !== void 0 && percent >= 100;
+  const failure = snapshot.status === "error" && snapshot.error !== void 0 ? statusHeadline(t, snapshot.error) : void 0;
+  const cycleStart = formatShortDay(report?.periodStart, t.lang);
+  const cycleEnd = formatShortDay(report?.periodEnd, t.lang);
+  const days = daysUntil(report?.expiresAt, now);
+  const owner = joinParts([report?.userType, report?.organizationName, report?.organizationRole]);
+  return /* @__PURE__ */ React2.createElement("section", { className: "qcp-main", "data-qoder-quota-panel": "true" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-inner" }, /* @__PURE__ */ React2.createElement("header", { className: "qcp-head" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-headText" }, /* @__PURE__ */ React2.createElement("h2", { className: "qcp-title" }, t.panelTitle), /* @__PURE__ */ React2.createElement("span", { className: "qcp-sub" }, t.panelSubtitle)), /* @__PURE__ */ React2.createElement("div", { className: "qcp-actions" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-meta" }, `${t.refreshedAt} ${refreshed}`), /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      type: "button",
+      className: "qcp-button",
+      onClick: () => {
+        props.refresh?.();
+      },
+      disabled: snapshot.status === "loading"
+    },
+    snapshot.status === "loading" ? t.loading : t.refresh
+  ), /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      type: "button",
+      className: "qcp-iconButton",
+      "aria-label": t.close,
+      title: t.closeHint,
+      onClick: () => {
+        props.close?.();
+      }
+    },
+    /* @__PURE__ */ React2.createElement("span", { "aria-hidden": "true" }, "\xD7")
+  ))), exceeded ? /* @__PURE__ */ React2.createElement("div", { className: "qcp-alert", role: "alert" }, /* @__PURE__ */ React2.createElement("strong", null, t.exceeded), /* @__PURE__ */ React2.createElement("span", { className: "qcp-alertDetail" }, t.exceededHint)) : null, failure === void 0 ? null : /* @__PURE__ */ React2.createElement("div", { className: "qcp-alert", role: "alert" }, /* @__PURE__ */ React2.createElement("strong", null, failure.title), failure.detail === void 0 ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-alertDetail" }, failure.detail)), report === void 0 ? /* @__PURE__ */ React2.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-note" }, snapshot.status === "loading" || snapshot.status === "idle" ? t.loading : t.error)) : /* @__PURE__ */ React2.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-identity" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-avatar", "aria-hidden": "true" }, "Q"), /* @__PURE__ */ React2.createElement("div", { className: "qcp-idText" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-planName" }, report.planTierName), owner === "" ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-planOwner" }, owner)), /* @__PURE__ */ React2.createElement("span", { className: "qcp-spacer" }), exceeded ? /* @__PURE__ */ React2.createElement("span", { className: "qcp-badge qcp-badgeWarn" }, t.exceededShort) : null), /* @__PURE__ */ React2.createElement("div", { className: "qcp-divider" }), /* @__PURE__ */ React2.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-blockTitle" }, t.usageBlock), personal === void 0 ? /* @__PURE__ */ React2.createElement("span", { className: "qcp-note" }, t.noPersonalPool) : /* @__PURE__ */ React2.createElement(
+    QuotaWindow,
+    {
+      t,
+      label: t.personalPool,
+      pool: personal,
+      ...report.expiresAt === void 0 ? {} : { expiresAt: report.expiresAt },
+      warn: exceeded
+    }
+  )), personal === void 0 ? null : /* @__PURE__ */ React2.createElement("div", { className: "qcp-tiles" }, /* @__PURE__ */ React2.createElement(
+    QuotaTile,
+    {
+      label: t.billingCycle,
+      value: cycleStart === void 0 || cycleEnd === void 0 ? t.noDeadline : `${cycleStart} \u2192 ${cycleEnd}`,
+      ...formatYearSpan(report.periodStart, report.periodEnd) === void 0 ? {} : { sub: formatYearSpan(report.periodStart, report.periodEnd) },
+      small: true
+    }
+  ), /* @__PURE__ */ React2.createElement(
+    QuotaTile,
+    {
+      label: t.used,
+      value: `${formatCredits(personal.used)} ${personal.unit}`,
+      sub: `${t.limit} ${formatCredits(personal.total)} ${personal.unit}`
+    }
+  ), /* @__PURE__ */ React2.createElement(
+    QuotaTile,
+    {
+      label: t.remaining,
+      value: `${formatCredits(personal.remaining)} ${personal.unit}`,
+      sub: `${String(Math.max(0, 100 - percent))}%`
+    }
+  ), /* @__PURE__ */ React2.createElement(
+    QuotaTile,
+    {
+      label: t.resetAt,
+      value: formatDay(report.expiresAt, t.lang) ?? t.noDeadline,
+      ...days === void 0 ? {} : { sub: `${String(days)} ${t.daysLeftSuffix}` },
+      small: true
+    }
+  ))), report?.addOnPool === void 0 ? null : /* @__PURE__ */ React2.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-blockTitle" }, t.addOnPool), /* @__PURE__ */ React2.createElement(
+    QuotaWindow,
+    {
+      t,
+      label: t.addOnPool,
+      pool: report.addOnPool,
+      ...report.expiresAt === void 0 ? {} : { expiresAt: report.expiresAt },
+      warn: false
+    }
+  ))), organizationActive ? /* @__PURE__ */ React2.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-blockTitle" }, t.organizationPool), /* @__PURE__ */ React2.createElement(
+    QuotaWindow,
+    {
+      t,
+      label: t.organizationPool,
+      pool: organization,
+      ...report?.expiresAt === void 0 ? {} : { expiresAt: report.expiresAt },
+      warn: false
+    }
+  ))) : organization === void 0 ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-note" }, t.orgPoolDormant), /* @__PURE__ */ React2.createElement("div", { className: "qcp-panelFoot" }, report?.upgradeUrl === void 0 ? null : /* @__PURE__ */ React2.createElement("a", { className: "qcp-link", href: report.upgradeUrl, target: "_blank", rel: "noreferrer" }, t.upgrade), enabled ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-note" }, t.settingsToggleHint))));
+}
 
 // src/client/settings.ts
 var SETTINGS_NS = "llm-qoder";
@@ -810,7 +955,7 @@ function selectPanel(ctx, id) {
   const layout = typeof get === "function" ? get.call(ctx, "layout") : void 0;
   layout?.selectPanel(id);
 }
-var locale = {
+var locale2 = {
   zh: {
     title: "Qoder CN",
     configured: "PAT \u5DF2\u914D\u7F6E",
@@ -845,8 +990,9 @@ var locale = {
   }
 };
 function apply(ctx) {
-  ctx.effect(() => ctx.locale.register("settings.qoder", locale));
+  ctx.effect(() => ctx.locale.register("settings.qoder", locale2));
   ctx.effect(() => ctx.locale.register(PANEL_LOCALE_NS, { zh: PANEL_TEXT_ZH, en: PANEL_TEXT_EN }));
+  ctx.effect(() => injectQuotaStyles(), "dsh-provider-qoder: quota styles");
   let settings;
   const quotaSettings = createQuotaSettingsFace(() => settings);
   let quotaNamespace;

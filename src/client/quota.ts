@@ -35,6 +35,14 @@ export type QoderQuotaResolver = () => QoderQuotaNamespace | undefined
 /** How often a mounted surface re-reads the quota. */
 export const QUOTA_AUTO_REFRESH_MS = 120_000
 
+/**
+ * The message this controller reports when the browser half has no
+ * `remote.qoder` namespace to call. The surfaces match on it to name that state
+ * ("the quota service is not mounted") instead of echoing the sentence, so the
+ * two spellings must stay in step.
+ */
+export const QUOTA_REMOTE_UNMOUNTED_ERROR = 'the qoder/quota remote is not mounted'
+
 /** One controller state. */
 export interface QuotaSnapshot {
   status: 'idle' | 'loading' | 'ready' | 'error'
@@ -71,7 +79,7 @@ export function createQuotaController(resolve: QoderQuotaResolver): QuotaControl
       if (ticket !== generation) return
       snapshot = {
         status: 'error',
-        error: 'the qoder/quota remote is not mounted',
+        error: QUOTA_REMOTE_UNMOUNTED_ERROR,
         ...(snapshot.fetchedAt === undefined ? {} : { fetchedAt: snapshot.fetchedAt }),
       }
       publish()
