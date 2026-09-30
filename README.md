@@ -38,6 +38,19 @@ The provider checks the stored credential first and then the launch environment.
 
 Public CN cloud needs no endpoint settings. For an enterprise VPC, set `QODER_VPC_INSTANCE` in the launch environment before starting Desktop, or provide the corresponding `llm-qoder` profile value through the active DSH configuration.
 
+## Compatibility scope
+
+The adapter is bound to an **account**, not to an organisation, tenancy, or plan. It needs a Qoder CN personal access token and a reachable endpoint; every request afterwards carries that token's own identity and plan.
+
+- **Accounts** — any Qoder CN account that can issue a PAT: personal (free or paid), team, or enterprise. The model selector lists whatever the live catalog serves that account, and the chat route is identical for all of them.
+- **Deployment** — public CN cloud by default (`gateway.qoder.com.cn`, `openapi.qoder.com.cn`). A **team or enterprise plan is served there too**: a team member's account needs no extra configuration, which is the path verified below. A private VPC tenant is supported by setting `QODER_VPC_INSTANCE` (aliases `QODER_VPC_ENDPOINT`, `QODERCN_VPC_ENDPOINT`, `QODERCN_CLI_VPC_ENDPOINT`) or the `baseURL`/`openApiUrl` provider options; the gateway, openapi, and dashboard hosts are derived from the instance name.
+- **Plan differences reach only the quota surfaces, and they degrade.** The plan, the gateway pools, and the add-on balance are read independently: a report renders as long as one of the three answers, and only all three failing is an error. A pool the plan does not expose is reported as dormant rather than missing, and the add-on card exists only when there is a balance.
+- **A PAT shows that token's own view** — its personal pool, plus the organisation pool when its organisation has one enabled. An organisation administrator's token returns the administrator's own identity and pools from the same endpoints; the panel prints the identity the service reports rather than assuming a role.
+
+### Verified, and not
+
+The public CN cloud path is verified end to end against a live team account (Teams plan, organisation member, zero VPC configuration). The private VPC path is implemented — endpoint derivation included — but has not been exercised against a real tenant, and neither has a free or personal account. Treat those as untested: if one misbehaves, an issue with the response you got is the fastest fix.
+
 ## Plans and quota
 
 The client half can show Qoder CN's plan and credit usage in two places.
