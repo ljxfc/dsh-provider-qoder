@@ -16,8 +16,8 @@
 
 import * as React from 'react'
 import { useEffect } from 'react'
-import type { QuotaSnapshotWire } from '../usage-wire.ts'
-import { PANEL_TEXT_EN, qoderPanelText, type QoderPanelText } from './copy.ts'
+import type { QuotaSnapshotWire, QuotaSpendWire, QuotaSpendWindowWire } from '../usage-wire.ts'
+import { PANEL_TEXT_EN, qoderPanelText, spendWindowLabel, type QoderPanelText } from './copy.ts'
 import type { QuotaController, QuotaSnapshot } from './quota.ts'
 import type { QoderQuotaSettingsFace, QoderQuotaSettingsSnapshot } from './settings.ts'
 
@@ -132,6 +132,72 @@ function useView(props: QoderQuotaSurfaceProps): QuotaView {
   return { t, snapshot, report: snapshot.report }
 }
 
+/** The shortest and the longest window, which is all the sidebar line needs. */
+function windowExtremes(spend: QuotaSpendWire): {
+  short?: QuotaSpendWindowWire
+  long?: QuotaSpendWindowWire
+} {
+  let short: QuotaSpendWindowWire | undefined
+  let long: QuotaSpendWindowWire | undefined
+  for (const window of spend.windows) {
+    if (short === undefined || window.spanMs < short.spanMs) short = window
+    if (long === undefined || window.spanMs > long.spanMs) long = window
+  }
+  return {
+    ...short === undefined ? {} : { short },
+    ...long === undefined ? {} : { long },
+  }
+}
+
+/**
+ * The sidebar's one-line rolling summary: the shortest and the longest window
+ * the Host reports, which is the five-hour and weekly pair it publishes today.
+ * The two ends are picked by span rather than by index, so a Host that adds a
+ * window cannot silently change what the line means.
+ */
+function spendBrief(spend: QuotaSpendWire, t: QoderPanelText): string | undefined {
+  const { short, long } = windowExtremes(spend)
+  if (short === undefined || long === undefined) return undefined
+  const windows = short.spanMs === long.spanMs ? [short] : [short, long]
+  const parts = windows.map(
+    (window) => `${spendWindowLabel(window.spanMs, t, true)} ${formatCredits(window.credits)}`,
+  )
+  return `${parts.join(' · ')} ${t.creditsUnit}`
+}
+
+/** Locally measured rolling spend: one row per window, plus the disclaimer. */
+function SpendSection(props: { t: QoderPanelText; spend: QuotaSpendWire }): React.ReactElement {
+  const { t, spend } = props
+  return (
+    <section
+      data-qoder-spend="true"
+      style={{ display: 'grid', gap: '8px', padding: '10px 12px', border: '1px solid rgba(127,127,127,0.3)', borderRadius: '8px' }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+        <strong>{t.spendTitle}</strong>
+        <small style={{ opacity: 0.75 }}>
+          {spend.updatedAt === undefined ? t.spendNever : formatMoment(spend.updatedAt, t.lang) ?? t.spendNever}
+        </small>
+      </div>
+      {spend.windows.map((window) => (
+        <div key={window.spanMs} style={{ display: 'grid', gap: '2px' }}>
+          <QuotaRow
+            label={spendWindowLabel(window.spanMs, t)}
+            value={`${formatCredits(window.credits)} ${t.creditsUnit}`}
+          />
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', opacity: 0.7 }}>
+            <small>{`${t.spendRequests} ${String(window.requests)}`}</small>
+            {window.resetsAt === undefined ? null : (
+              <small>{`${t.resetAt} ${formatMoment(window.resetsAt, t.lang) ?? t.noDeadline}`}</small>
+            )}
+          </div>
+        </div>
+      ))}
+      <small style={{ opacity: 0.7 }}>{t.spendHint}</small>
+    </section>
+  )
+}
+
 /** Sidebar footer row: hidden unless the toggle is on. */
 export function QoderQuotaFooterEntry(props: QoderQuotaSurfaceProps): React.ReactElement | null {
   const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false
@@ -148,6 +214,7 @@ export function QoderQuotaFooterEntry(props: QoderQuotaSurfaceProps): React.Reac
   const summary = report === undefined
     ? snapshot.status === 'loading' ? t.loading : t.error
     : `${report.planTierName} · ${formatRatio(report.totalPercentage)}`
+  const brief = report?.spend === undefined ? undefined : spendBrief(report.spend, t)
 
   return (
     <button
@@ -156,14 +223,19 @@ export function QoderQuotaFooterEntry(props: QoderQuotaSurfaceProps): React.Reac
       title={t.cardHint}
       onClick={() => { props.open?.() }}
       style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px',
+        display: 'grid', gap: '4px',
         width: '100%', padding: '8px 10px', border: '1px solid rgba(127,127,127,0.35)',
         borderRadius: '8px', background: 'transparent', color: 'inherit', cursor: 'pointer',
         font: 'inherit', textAlign: 'left',
       }}
     >
-      <span>{t.cardTitle}</span>
-      <small style={{ opacity: 0.75 }}>{summary}</small>
+      <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+        <span>{t.cardTitle}</span>
+        <small style={{ opacity: 0.75 }}>{summary}</small>
+      </span>
+      {/* The rolling totals are the part of "how much have I used" the monthly
+          pool cannot answer, so the card carries them on their own line. */}
+      {brief === undefined ? null : <small style={{ opacity: 0.6 }}>{brief}</small>}
     </button>
   )
 }
@@ -261,6 +333,8 @@ export function QoderQuotaPanel(props: QoderQuotaSurfaceProps): React.ReactEleme
       {report?.addOnPool === undefined ? null : (
         <QuotaPool t={t} title={t.addOnPool} pool={report.addOnPool} expiresAt={report.expiresAt} />
       )}
+
+      {report?.spend === undefined ? null : <SpendSection t={t} spend={report.spend} />}
 
       <footer style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', opacity: 0.7 }}>
         <small>{`${t.refreshedAt} ${refreshed}`}</small>

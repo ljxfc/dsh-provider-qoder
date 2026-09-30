@@ -781,6 +781,17 @@ function splitThinking(chunk) {
 }
 
 // src/translate.ts
+function readUsageAccounting(usage) {
+  const accounting = {};
+  if (typeof usage.credits === "number" && Number.isFinite(usage.credits)) {
+    accounting.credits = usage.credits;
+  }
+  if (typeof usage.original_credits === "number" && Number.isFinite(usage.original_credits)) {
+    accounting.originalCredits = usage.original_credits;
+  }
+  if (typeof usage.billable === "boolean") accounting.billable = usage.billable;
+  return Object.keys(accounting).length === 0 ? void 0 : accounting;
+}
 function mapFinishReason(reason) {
   switch (reason) {
     case "stop":
@@ -830,7 +841,7 @@ function parseInnerObject(body) {
   }
   return {};
 }
-async function* translate(envelopes, reasoningEnabled = true) {
+async function* translate(envelopes, reasoningEnabled = true, observeUsage) {
   let nextIndex = 0;
   let textBlock;
   let reasoningBlock;
@@ -838,6 +849,7 @@ async function* translate(envelopes, reasoningEnabled = true) {
   const order = [];
   let pendingFinish;
   let pendingUsage;
+  let pendingAccounting;
   const open = (kind) => {
     const block = { index: nextIndex++, kind, text: "" };
     order.push(block);
@@ -845,6 +857,12 @@ async function* translate(envelopes, reasoningEnabled = true) {
   };
   for await (const item of envelopes) {
     if (item === DONE) {
+      if (pendingAccounting !== void 0 && observeUsage !== void 0) {
+        try {
+          observeUsage(pendingAccounting);
+        } catch (_observerFailure) {
+        }
+      }
       for (const block of order) {
         yield { type: "block-end", index: block.index, block: closeBlock(block) };
       }
@@ -947,9 +965,124 @@ async function* translate(envelopes, reasoningEnabled = true) {
         pendingFinish = mapFinishReason(choice.finish_reason);
       }
     }
-    if (inner.usage) pendingUsage = mapUsage(inner.usage);
+    if (inner.usage) {
+      pendingUsage = mapUsage(inner.usage);
+      const accounting = readUsageAccounting(inner.usage);
+      if (accounting !== void 0) pendingAccounting = accounting;
+    }
   }
   throw new LlmError3("Qoder SSE payload stream ended without [DONE]", "STREAM_CLOSED");
+}
+
+// src/usage-ledger.ts
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname2, join as join2 } from "node:path";
+var HOUR_MS = 60 * 60 * 1e3;
+var QODER_SPEND_WINDOWS_MS = [
+  5 * HOUR_MS,
+  24 * HOUR_MS,
+  7 * 24 * HOUR_MS
+];
+var SPEND_RETENTION_MS = 8 * 24 * HOUR_MS;
+var CREDIT_DECIMALS = 1e6;
+function spendLedgerPath() {
+  const configured = process.env.DSH_HOME?.trim();
+  const root = configured !== void 0 && configured.length > 0 ? configured : join2(homedir2(), ".dsh");
+  return join2(root, "qoder-spend.jsonl");
+}
+function parseRecord(line) {
+  let value;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return void 0;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return void 0;
+  const source = value;
+  const { at, credits } = source;
+  if (typeof at !== "number" || !Number.isFinite(at)) return void 0;
+  if (typeof credits !== "number" || !Number.isFinite(credits) || credits <= 0) return void 0;
+  const record2 = { at, credits };
+  const original = source.originalCredits;
+  if (typeof original === "number" && Number.isFinite(original) && original > 0) {
+    record2.originalCredits = original;
+  }
+  const model = source.model;
+  if (typeof model === "string" && model.length > 0) record2.model = model;
+  return record2;
+}
+function roundCredits(value) {
+  return Math.round(value * CREDIT_DECIMALS) / CREDIT_DECIMALS;
+}
+function summariseSpend(records, now, windows = QODER_SPEND_WINDOWS_MS) {
+  const fresh = records.filter(
+    (record2) => record2.at <= now && now - record2.at < SPEND_RETENTION_MS
+  );
+  const summary = {
+    windows: windows.map((spanMs) => {
+      let credits = 0;
+      let requests = 0;
+      let oldest;
+      for (const record2 of fresh) {
+        if (now - record2.at >= spanMs) continue;
+        credits += record2.credits;
+        requests += 1;
+        if (oldest === void 0 || record2.at < oldest) oldest = record2.at;
+      }
+      const window = { spanMs, credits: roundCredits(credits), requests };
+      if (oldest !== void 0) window.resetsAt = oldest + spanMs;
+      return window;
+    })
+  };
+  let updatedAt;
+  for (const record2 of fresh) {
+    if (updatedAt === void 0 || record2.at > updatedAt) updatedAt = record2.at;
+  }
+  if (updatedAt !== void 0) summary.updatedAt = updatedAt;
+  return summary;
+}
+async function recordQoderSpend(record2) {
+  if (!Number.isFinite(record2.credits) || record2.credits <= 0) return;
+  try {
+    const path = spendLedgerPath();
+    await mkdir(dirname2(path), { recursive: true });
+    await appendFile(path, `${JSON.stringify(record2)}
+`, "utf8");
+  } catch {
+  }
+}
+async function compactLedger(path, records) {
+  try {
+    await writeFile(path, records.map((record2) => `${JSON.stringify(record2)}
+`).join(""), "utf8");
+  } catch {
+  }
+}
+async function readSpendRecords(now = Date.now()) {
+  const path = spendLedgerPath();
+  let text;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    return [];
+  }
+  const kept = [];
+  let dropped = 0;
+  for (const line of text.split("\n")) {
+    if (line.length === 0) continue;
+    const record2 = parseRecord(line);
+    if (record2 === void 0 || now - record2.at >= SPEND_RETENTION_MS) {
+      dropped += 1;
+      continue;
+    }
+    kept.push(record2);
+  }
+  if (dropped > 0) await compactLedger(path, kept);
+  return kept;
+}
+async function readQoderSpend(now = Date.now()) {
+  return summariseSpend(await readSpendRecords(now), now);
 }
 
 // src/annotate.ts
@@ -1350,11 +1483,12 @@ var QoderAdapter = class extends LlmAdapter {
     const connection = this.config.options();
     const rawPat = await this.config.resolveApiKey(connection);
     const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal);
-    return fetchQoderQuota(
+    const report = await fetchQoderQuota(
       jobToken,
       { gateway: connection.endpoints.gateway, openapi: connection.endpoints.openapi },
       signal
     );
+    return { ...report, spend: await readQoderSpend() };
   }
   async *request(options, signal, connection, rawPat, onComment) {
     const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal);
@@ -1479,7 +1613,37 @@ var QoderAdapter = class extends LlmAdapter {
       throw new LlmError4("Qoder CN API returned no response body", "EMPTY_RESPONSE");
     }
     const envelopes = parseQoderSse(response.body);
-    yield* translate(mapEnvelopes(envelopes, onComment), reasoningEnabled);
+    yield* translate(
+      mapEnvelopes(envelopes, onComment),
+      reasoningEnabled,
+      // The gateway reports the request's credit charge on the same frame as
+      // its token counts. Recording it here — the one place that knows both the
+      // charge and the model that produced it — is what lets the quota surfaces
+      // report a rolling window Qoder itself never publishes.
+      (accounting) => {
+        this.recordSpend(accounting, options.model);
+      }
+    );
+  }
+  /**
+   * Record one request's credit charge in the rolling ledger.
+   *
+   * Only a completed, actually billed request is worth a ledger line: a
+   * `billable: false` response (the gateway's answer to an unknown model key)
+   * and a zero charge would each add a request to a window without adding any
+   * spend. Recording is fire-and-forget — the response has already succeeded by
+   * this point, so the ledger must never be able to fail it.
+   */
+  recordSpend(accounting, model) {
+    if (accounting.billable === false) return;
+    const credits = accounting.credits;
+    if (credits === void 0 || !(credits > 0)) return;
+    void recordQoderSpend({
+      at: Date.now(),
+      credits,
+      ...accounting.originalCredits === void 0 ? {} : { originalCredits: accounting.originalCredits },
+      model
+    });
   }
   /** Exchange or refresh the job token for one PAT, caching per process. */
   async ensureJobToken(rawPat, endpoints, signal) {
@@ -1599,6 +1763,10 @@ function booleanField(source, key) {
   const value = source[key];
   return typeof value === "boolean" ? value : reject(key);
 }
+function arrayField(source, key) {
+  const value = source[key];
+  return Array.isArray(value) ? value : reject(key);
+}
 function parsePool(value, field) {
   const source = record(value, field);
   return {
@@ -1609,6 +1777,22 @@ function parsePool(value, field) {
     unit: stringField(source, "unit"),
     available: booleanField(source, "available")
   };
+}
+function parseSpend(value, field) {
+  const source = record(value, field);
+  const windows = arrayField(source, "windows").map((entry, index) => {
+    const window = record(entry, `${field}.windows[${String(index)}]`);
+    const parsed = {
+      spanMs: numberField(window, "spanMs"),
+      credits: numberField(window, "credits"),
+      requests: numberField(window, "requests")
+    };
+    if (window.resetsAt !== void 0) parsed.resetsAt = numberField(window, "resetsAt");
+    return parsed;
+  });
+  const spend = { windows };
+  if (source.updatedAt !== void 0) spend.updatedAt = numberField(source, "updatedAt");
+  return spend;
 }
 function parseQuotaSnapshot(value) {
   const source = record(value, "result");
@@ -1635,6 +1819,9 @@ function parseQuotaSnapshot(value) {
   }
   if (source.upgradeUrl !== void 0) {
     snapshot.upgradeUrl = stringField(source, "upgradeUrl");
+  }
+  if (source.spend !== void 0) {
+    snapshot.spend = parseSpend(source.spend, "spend");
   }
   return snapshot;
 }
@@ -1679,6 +1866,7 @@ function toQuotaSnapshot(report) {
   if (report.organizationPool !== void 0) snapshot.organizationPool = report.organizationPool;
   if (report.addOnPool !== void 0) snapshot.addOnPool = report.addOnPool;
   if (report.upgradeUrl !== void 0) snapshot.upgradeUrl = report.upgradeUrl;
+  if (report.spend !== void 0) snapshot.spend = report.spend;
   return snapshot;
 }
 var QoderUsageService = class extends TypertRemoteService {
@@ -1941,9 +2129,11 @@ export {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DONE,
   PUBLIC_GATEWAY_URL,
+  QODER_SPEND_WINDOWS_MS,
   QUOTA_ENDPOINT,
   QUOTA_TIMEOUT_MS,
   QoderAdapter,
+  SPEND_RETENTION_MS,
   apply,
   buildQoderAuthHeaders,
   compareModelsForSelector,
@@ -1970,9 +2160,15 @@ export {
   parseQuotaSnapshot,
   qoderCnEndpoints,
   qoderEncodeBody,
+  readQoderSpend,
+  readSpendRecords,
+  readUsageAccounting,
+  recordQoderSpend,
   refreshJobToken,
   resolveAdapterOptions,
   serializeMessages,
   serializeRequest,
+  spendLedgerPath,
+  summariseSpend,
   systemTextOf
 };

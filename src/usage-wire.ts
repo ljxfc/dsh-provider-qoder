@@ -37,6 +37,38 @@ export interface QuotaPoolWire {
   available: boolean
 }
 
+/** One rolling spend window, measured locally (see `src/usage-ledger.ts`). */
+export interface QuotaSpendWindowWire {
+  /** Window length in milliseconds. */
+  spanMs: number
+  /** Credits billed by completed requests inside the window. */
+  credits: number
+  /** Number of completed billed requests inside the window. */
+  requests: number
+  /**
+   * When the oldest counted request falls out of the window (epoch millis).
+   * Absent while the window is empty: a rolling window holding nothing has no
+   * next release to announce.
+   */
+  resetsAt?: number
+}
+
+/**
+ * Locally measured rolling spend.
+ *
+ * Qoder CN publishes no rolling window of its own — its panel reports credits
+ * consumed inside the monthly billing cycle and nothing finer — so these totals
+ * are summed from the credit figure the gateway returns with every completed
+ * request rather than read from Qoder. Every surface labels them as locally
+ * measured for that reason, and the monthly pool stays the server's own number.
+ */
+export interface QuotaSpendWire {
+  /** Rolling windows, ordered shortest first. */
+  windows: QuotaSpendWindowWire[]
+  /** When the newest recorded request completed (epoch millis); absent while empty. */
+  updatedAt?: number
+}
+
 /** The account facts the panel renders. */
 export interface QuotaSnapshotWire {
   planTierName: string
@@ -57,6 +89,11 @@ export interface QuotaSnapshotWire {
   isQuotaExceeded: boolean
   expiresAt: number
   upgradeUrl?: string
+  /**
+   * Rolling spend measured on this machine. Absent when the Host half did not
+   * record any (an older Host), never a stand-in for a Qoder-reported window.
+   */
+  spend?: QuotaSpendWire
 }
 
 /** Reject one boundary value, naming the offending field. */
@@ -85,6 +122,11 @@ function booleanField(source: Record<string, unknown>, key: string): boolean {
   return typeof value === 'boolean' ? value : reject(key)
 }
 
+function arrayField(source: Record<string, unknown>, key: string): unknown[] {
+  const value = source[key]
+  return Array.isArray(value) ? value : reject(key)
+}
+
 /** Parse one untrusted boundary value into a {@link QuotaPoolWire}. */
 function parsePool(value: unknown, field: string): QuotaPoolWire {
   const source = record(value, field)
@@ -99,11 +141,33 @@ function parsePool(value: unknown, field: string): QuotaPoolWire {
 }
 
 /**
+ * Parse one untrusted boundary value into a {@link QuotaSpendWire}. Only
+ * `windows` is required: an empty ledger legitimately carries no timestamp.
+ */
+function parseSpend(value: unknown, field: string): QuotaSpendWire {
+  const source = record(value, field)
+  const windows = arrayField(source, 'windows').map((entry, index) => {
+    const window = record(entry, `${field}.windows[${String(index)}]`)
+    const parsed: QuotaSpendWindowWire = {
+      spanMs: numberField(window, 'spanMs'),
+      credits: numberField(window, 'credits'),
+      requests: numberField(window, 'requests'),
+    }
+    if (window.resetsAt !== undefined) parsed.resetsAt = numberField(window, 'resetsAt')
+    return parsed
+  })
+  const spend: QuotaSpendWire = { windows }
+  if (source.updatedAt !== undefined) spend.updatedAt = numberField(source, 'updatedAt')
+  return spend
+}
+
+/**
  * Parse one untrusted boundary value into a {@link QuotaSnapshotWire}. Every
  * required field is shape-checked so a malformed frame fails the boundary
- * instead of rendering garbage; the two genuinely optional members (the
- * organization pool and the upgrade link) stay optional, and a PRESENT but
- * malformed value is still a contract violation rather than a silent drop.
+ * instead of rendering garbage; the genuinely optional members (the
+ * organization pool, the add-on pool, the upgrade link, the locally measured
+ * spend) stay optional, and a PRESENT but malformed value is still a contract
+ * violation rather than a silent drop.
  */
 export function parseQuotaSnapshot(value: unknown): QuotaSnapshotWire {
   const source = record(value, 'result')
@@ -130,6 +194,9 @@ export function parseQuotaSnapshot(value: unknown): QuotaSnapshotWire {
   }
   if (source.upgradeUrl !== undefined) {
     snapshot.upgradeUrl = stringField(source, 'upgradeUrl')
+  }
+  if (source.spend !== undefined) {
+    snapshot.spend = parseSpend(source.spend, 'spend')
   }
   return snapshot
 }

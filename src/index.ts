@@ -42,7 +42,8 @@ export type { QoderAdapterOptions, QoderCatalogModel, QoderConnectionOptions } f
 export { qoderEncodeBody } from './qoder-encoding.ts'
 export { serializeMessages, serializeRequest, systemTextOf } from './serialize.ts'
 export type { QoderMessage, QoderSerializedRequest } from './serialize.ts'
-export { mapFinishReason, mapUsage } from './translate.ts'
+export { mapFinishReason, mapUsage, readUsageAccounting } from './translate.ts'
+export type { QoderUsageAccounting, QoderUsageObserver } from './translate.ts'
 export { parseQoderSse, parseEnvelope, DONE } from './sse.ts'
 export {
   buildQoderAuthHeaders,
@@ -54,7 +55,17 @@ export { exchangeJobToken, refreshJobToken, fetchUserInfo } from './pat.ts'
 export { fetchQoderQuota, parseQuotaPool, QUOTA_TIMEOUT_MS } from './usage.ts'
 export type { QoderQuotaPool, QoderUsageReport } from './usage.ts'
 export { parseQuotaSnapshot, QUOTA_ENDPOINT } from './usage-wire.ts'
-export type { QuotaPoolWire, QuotaSnapshotWire } from './usage-wire.ts'
+export type { QuotaPoolWire, QuotaSnapshotWire, QuotaSpendWire, QuotaSpendWindowWire } from './usage-wire.ts'
+export {
+  readQoderSpend,
+  readSpendRecords,
+  recordQoderSpend,
+  spendLedgerPath,
+  summariseSpend,
+  QODER_SPEND_WINDOWS_MS,
+  SPEND_RETENTION_MS,
+} from './usage-ledger.ts'
+export type { QoderSpendRecord } from './usage-ledger.ts'
 export {
   compareModelsForSelector,
   formatContextWindow,

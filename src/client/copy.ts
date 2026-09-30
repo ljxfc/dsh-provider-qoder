@@ -78,6 +78,32 @@ export interface QoderPanelText {
   settingsToggleHint: string
   /** Settings toggle read/write failure. */
   settingsToggleFailed: string
+  /** Locally measured rolling-spend section heading. */
+  spendTitle: string
+  /** Locally measured rolling-spend disclaimer. */
+  spendHint: string
+  /** Shown when the ledger holds nothing yet. */
+  spendNever: string
+  /** Billed-request count label inside one rolling window. */
+  spendRequests: string
+  /** Credit unit used by the rolling totals. */
+  creditsUnit: string
+  /** Five-hour rolling window label. */
+  window5h: string
+  /** Day-long rolling window label. */
+  window24h: string
+  /** Weekly rolling window label. */
+  window7d: string
+  /** Five-hour label for the compact sidebar line. */
+  window5hShort: string
+  /** Day-long label for the compact sidebar line. */
+  window24hShort: string
+  /** Weekly label for the compact sidebar line. */
+  window7dShort: string
+  /** Hour unit for an unrecognised short window. */
+  hoursUnit: string
+  /** Day unit for an unrecognised window. */
+  daysUnit: string
 }
 
 /** Chinese copy (Qoder CN's own language). */
@@ -113,6 +139,19 @@ export const PANEL_TEXT_ZH: QoderPanelText = {
   settingsToggle: '在侧边栏显示额度卡片',
   settingsToggleHint: '默认关闭；关闭时左侧栏不渲染卡片，也不会后台刷新额度。',
   settingsToggleFailed: '开关写入失败，请重试。',
+  spendTitle: '滚动用量',
+  spendHint: '本地统计：由本机已完成的请求累计，Qoder 本身不提供 5 小时 / 每周窗口；月度额度以上方套餐池为准。',
+  spendNever: '尚无本地记录',
+  spendRequests: '请求',
+  creditsUnit: '积分',
+  window5h: '5 小时',
+  window24h: '24 小时',
+  window7d: '7 天',
+  window5hShort: '5h',
+  window24hShort: '24h',
+  window7dShort: '7d',
+  hoursUnit: '小时',
+  daysUnit: '天',
 }
 
 /** English copy. */
@@ -148,6 +187,47 @@ export const PANEL_TEXT_EN: QoderPanelText = {
   settingsToggle: 'Show the quota card in the sidebar',
   settingsToggleHint: 'Off by default; while off the sidebar renders no card and no background quota refresh runs.',
   settingsToggleFailed: 'The toggle could not be stored. Try again.',
+  spendTitle: 'Rolling usage',
+  spendHint: 'Measured locally from completed requests on this machine — Qoder reports no five-hour or weekly window itself; the monthly pools above stay authoritative.',
+  spendNever: 'No local records yet',
+  spendRequests: 'Requests',
+  creditsUnit: 'credits',
+  window5h: '5 hours',
+  window24h: '24 hours',
+  window7d: '7 days',
+  window5hShort: '5h',
+  window24hShort: '24h',
+  window7dShort: '7d',
+  hoursUnit: 'hours',
+  daysUnit: 'days',
+}
+
+/** One hour, in milliseconds; the window labels are keyed by these spans. */
+const HOUR_MS = 60 * 60 * 1000
+
+/**
+ * Label one rolling window.
+ *
+ * The three spans the Host publishes have their own words in both languages; an
+ * unrecognised span — a Host that adds or changes a window — falls back to a
+ * computed duration, so the surface stays truthful instead of printing a raw
+ * millisecond count at the user.
+ * @param spanMs - the window length in milliseconds.
+ * @param t - the resolved copy table.
+ * @param compact - whether the sidebar's short form is wanted.
+ * @returns the window label.
+ */
+export function spendWindowLabel(spanMs: number, t: QoderPanelText, compact = false): string {
+  switch (spanMs) {
+    case 5 * HOUR_MS: return compact ? t.window5hShort : t.window5h
+    case 24 * HOUR_MS: return compact ? t.window24hShort : t.window24h
+    case 7 * 24 * HOUR_MS: return compact ? t.window7dShort : t.window7d
+    default: break
+  }
+  const days = spanMs / (24 * HOUR_MS)
+  if (Number.isInteger(days) && days >= 1) return `${String(days)} ${t.daysUnit}`
+  const hours = Math.max(1, Math.round(spanMs / HOUR_MS))
+  return `${String(hours)} ${t.hoursUnit}`
 }
 
 /** Resolve the one table a raw `t` seat asks for. */

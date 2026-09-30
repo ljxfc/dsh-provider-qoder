@@ -58,6 +58,10 @@ function booleanField(source, key) {
   const value = source[key];
   return typeof value === "boolean" ? value : reject(key);
 }
+function arrayField(source, key) {
+  const value = source[key];
+  return Array.isArray(value) ? value : reject(key);
+}
 function parsePool(value, field) {
   const source = record(value, field);
   return {
@@ -68,6 +72,22 @@ function parsePool(value, field) {
     unit: stringField(source, "unit"),
     available: booleanField(source, "available")
   };
+}
+function parseSpend(value, field) {
+  const source = record(value, field);
+  const windows = arrayField(source, "windows").map((entry, index) => {
+    const window = record(entry, `${field}.windows[${String(index)}]`);
+    const parsed = {
+      spanMs: numberField(window, "spanMs"),
+      credits: numberField(window, "credits"),
+      requests: numberField(window, "requests")
+    };
+    if (window.resetsAt !== void 0) parsed.resetsAt = numberField(window, "resetsAt");
+    return parsed;
+  });
+  const spend = { windows };
+  if (source.updatedAt !== void 0) spend.updatedAt = numberField(source, "updatedAt");
+  return spend;
 }
 function parseQuotaSnapshot(value) {
   const source = record(value, "result");
@@ -94,6 +114,9 @@ function parseQuotaSnapshot(value) {
   }
   if (source.upgradeUrl !== void 0) {
     snapshot.upgradeUrl = stringField(source, "upgradeUrl");
+  }
+  if (source.spend !== void 0) {
+    snapshot.spend = parseSpend(source.spend, "spend");
   }
   return snapshot;
 }
@@ -246,7 +269,20 @@ var PANEL_TEXT_ZH = {
   never: "\u5C1A\u672A\u8BFB\u53D6",
   settingsToggle: "\u5728\u4FA7\u8FB9\u680F\u663E\u793A\u989D\u5EA6\u5361\u7247",
   settingsToggleHint: "\u9ED8\u8BA4\u5173\u95ED\uFF1B\u5173\u95ED\u65F6\u5DE6\u4FA7\u680F\u4E0D\u6E32\u67D3\u5361\u7247\uFF0C\u4E5F\u4E0D\u4F1A\u540E\u53F0\u5237\u65B0\u989D\u5EA6\u3002",
-  settingsToggleFailed: "\u5F00\u5173\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002"
+  settingsToggleFailed: "\u5F00\u5173\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002",
+  spendTitle: "\u6EDA\u52A8\u7528\u91CF",
+  spendHint: "\u672C\u5730\u7EDF\u8BA1\uFF1A\u7531\u672C\u673A\u5DF2\u5B8C\u6210\u7684\u8BF7\u6C42\u7D2F\u8BA1\uFF0CQoder \u672C\u8EAB\u4E0D\u63D0\u4F9B 5 \u5C0F\u65F6 / \u6BCF\u5468\u7A97\u53E3\uFF1B\u6708\u5EA6\u989D\u5EA6\u4EE5\u4E0A\u65B9\u5957\u9910\u6C60\u4E3A\u51C6\u3002",
+  spendNever: "\u5C1A\u65E0\u672C\u5730\u8BB0\u5F55",
+  spendRequests: "\u8BF7\u6C42",
+  creditsUnit: "\u79EF\u5206",
+  window5h: "5 \u5C0F\u65F6",
+  window24h: "24 \u5C0F\u65F6",
+  window7d: "7 \u5929",
+  window5hShort: "5h",
+  window24hShort: "24h",
+  window7dShort: "7d",
+  hoursUnit: "\u5C0F\u65F6",
+  daysUnit: "\u5929"
 };
 var PANEL_TEXT_EN = {
   lang: "en",
@@ -279,8 +315,38 @@ var PANEL_TEXT_EN = {
   never: "Never",
   settingsToggle: "Show the quota card in the sidebar",
   settingsToggleHint: "Off by default; while off the sidebar renders no card and no background quota refresh runs.",
-  settingsToggleFailed: "The toggle could not be stored. Try again."
+  settingsToggleFailed: "The toggle could not be stored. Try again.",
+  spendTitle: "Rolling usage",
+  spendHint: "Measured locally from completed requests on this machine \u2014 Qoder reports no five-hour or weekly window itself; the monthly pools above stay authoritative.",
+  spendNever: "No local records yet",
+  spendRequests: "Requests",
+  creditsUnit: "credits",
+  window5h: "5 hours",
+  window24h: "24 hours",
+  window7d: "7 days",
+  window5hShort: "5h",
+  window24hShort: "24h",
+  window7dShort: "7d",
+  hoursUnit: "hours",
+  daysUnit: "days"
 };
+var HOUR_MS = 60 * 60 * 1e3;
+function spendWindowLabel(spanMs, t, compact = false) {
+  switch (spanMs) {
+    case 5 * HOUR_MS:
+      return compact ? t.window5hShort : t.window5h;
+    case 24 * HOUR_MS:
+      return compact ? t.window24hShort : t.window24h;
+    case 7 * 24 * HOUR_MS:
+      return compact ? t.window7dShort : t.window7d;
+    default:
+      break;
+  }
+  const days = spanMs / (24 * HOUR_MS);
+  if (Number.isInteger(days) && days >= 1) return `${String(days)} ${t.daysUnit}`;
+  const hours = Math.max(1, Math.round(spanMs / HOUR_MS));
+  return `${String(hours)} ${t.hoursUnit}`;
+}
 function qoderPanelText(t) {
   const key = t("lang");
   return key === "zh" ? PANEL_TEXT_ZH : PANEL_TEXT_EN;
@@ -340,6 +406,46 @@ function useView(props) {
   const snapshot = props.useQuota?.((state) => state) ?? { status: "idle" };
   return { t, snapshot, report: snapshot.report };
 }
+function windowExtremes(spend) {
+  let short;
+  let long;
+  for (const window of spend.windows) {
+    if (short === void 0 || window.spanMs < short.spanMs) short = window;
+    if (long === void 0 || window.spanMs > long.spanMs) long = window;
+  }
+  return {
+    ...short === void 0 ? {} : { short },
+    ...long === void 0 ? {} : { long }
+  };
+}
+function spendBrief(spend, t) {
+  const { short, long } = windowExtremes(spend);
+  if (short === void 0 || long === void 0) return void 0;
+  const windows = short.spanMs === long.spanMs ? [short] : [short, long];
+  const parts = windows.map(
+    (window) => `${spendWindowLabel(window.spanMs, t, true)} ${formatCredits(window.credits)}`
+  );
+  return `${parts.join(" \xB7 ")} ${t.creditsUnit}`;
+}
+function SpendSection(props) {
+  const { t, spend } = props;
+  return /* @__PURE__ */ React2.createElement(
+    "section",
+    {
+      "data-qoder-spend": "true",
+      style: { display: "grid", gap: "8px", padding: "10px 12px", border: "1px solid rgba(127,127,127,0.3)", borderRadius: "8px" }
+    },
+    /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px" } }, /* @__PURE__ */ React2.createElement("strong", null, t.spendTitle), /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.75 } }, spend.updatedAt === void 0 ? t.spendNever : formatMoment(spend.updatedAt, t.lang) ?? t.spendNever)),
+    spend.windows.map((window) => /* @__PURE__ */ React2.createElement("div", { key: window.spanMs, style: { display: "grid", gap: "2px" } }, /* @__PURE__ */ React2.createElement(
+      QuotaRow,
+      {
+        label: spendWindowLabel(window.spanMs, t),
+        value: `${formatCredits(window.credits)} ${t.creditsUnit}`
+      }
+    ), /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px", opacity: 0.7 } }, /* @__PURE__ */ React2.createElement("small", null, `${t.spendRequests} ${String(window.requests)}`), window.resetsAt === void 0 ? null : /* @__PURE__ */ React2.createElement("small", null, `${t.resetAt} ${formatMoment(window.resetsAt, t.lang) ?? t.noDeadline}`)))),
+    /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.7 } }, t.spendHint)
+  );
+}
 function QoderQuotaFooterEntry(props) {
   const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
   const { t, snapshot, report } = useView(props);
@@ -350,6 +456,7 @@ function QoderQuotaFooterEntry(props) {
   }, [enabled, startAutoRefresh]);
   if (!enabled) return null;
   const summary = report === void 0 ? snapshot.status === "loading" ? t.loading : t.error : `${report.planTierName} \xB7 ${formatRatio(report.totalPercentage)}`;
+  const brief = report?.spend === void 0 ? void 0 : spendBrief(report.spend, t);
   return /* @__PURE__ */ React2.createElement(
     "button",
     {
@@ -360,10 +467,8 @@ function QoderQuotaFooterEntry(props) {
         props.open?.();
       },
       style: {
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: "8px",
+        display: "grid",
+        gap: "4px",
         width: "100%",
         padding: "8px 10px",
         border: "1px solid rgba(127,127,127,0.35)",
@@ -375,8 +480,8 @@ function QoderQuotaFooterEntry(props) {
         textAlign: "left"
       }
     },
-    /* @__PURE__ */ React2.createElement("span", null, t.cardTitle),
-    /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.75 } }, summary)
+    /* @__PURE__ */ React2.createElement("span", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" } }, /* @__PURE__ */ React2.createElement("span", null, t.cardTitle), /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.75 } }, summary)),
+    brief === void 0 ? null : /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.6 } }, brief)
   );
 }
 function QoderQuotaPanel(props) {
@@ -433,6 +538,7 @@ function QoderQuotaPanel(props) {
       }
     ),
     report?.addOnPool === void 0 ? null : /* @__PURE__ */ React2.createElement(QuotaPool, { t, title: t.addOnPool, pool: report.addOnPool, expiresAt: report.expiresAt }),
+    report?.spend === void 0 ? null : /* @__PURE__ */ React2.createElement(SpendSection, { t, spend: report.spend }),
     /* @__PURE__ */ React2.createElement("footer", { style: { display: "flex", justifyContent: "space-between", gap: "12px", opacity: 0.7 } }, /* @__PURE__ */ React2.createElement("small", null, `${t.refreshedAt} ${refreshed}`), report?.upgradeUrl === void 0 ? null : /* @__PURE__ */ React2.createElement("a", { href: report.upgradeUrl, target: "_blank", rel: "noreferrer" }, t.upgrade)),
     enabled ? null : /* @__PURE__ */ React2.createElement("small", { style: { opacity: 0.7 } }, t.settingsToggleHint)
   );
