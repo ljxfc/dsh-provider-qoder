@@ -18,9 +18,9 @@ Use the Desktop plugin manager:
 
 This GitHub install path is the intended Desktop flow. The plugin package declares `dsh.bundle.patch` and includes the generated `dist/index.js`, so Desktop does not need a running `qodercn` process.
 
-The package declares **no runtime dependencies** and its build is committed, so installing it adds exactly one package, runs no build, and installs nothing else: the six files it ships are the whole plugin. Tagged releases are listed under **Releases**; `v0.2.0` is the current one.
+The package declares **no runtime dependencies** and its build is committed, so installing it adds exactly one package, runs no build, and installs nothing else; the files it ships are the whole plugin. Tagged releases are listed under **Releases**; `v0.2.0` is the current one.
 
-To test an unpushed working copy, Desktop's **Add plugin** dialog also accepts an absolute local directory such as `D:\plugins\dsh-provider-qoder`.
+To test an unpushed working copy, Desktop's **Add plugin** dialog also accepts an absolute local directory — the path to your own checkout, for example `C:\src\dsh-provider-qoder`.
 
 ## PAT configuration
 
@@ -33,7 +33,8 @@ If the client card is unavailable, configure the Qoder PAT in the launch environ
 # started from this PowerShell process.
 Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | Stop-Process
 $env:QODERCN_PERSONAL_ACCESS_TOKEN = 'pt-your-qoder-pat'
-Start-Process 'D:\DeepSeek Harness\DeepSeek Harness.exe'
+# Adjust to where Desktop is actually installed.
+Start-Process '<your install dir>\DeepSeek Harness.exe'
 ```
 
 For a persistent Windows setup, add the same name/value under **Windows Settings → System → About → Advanced system settings → Environment Variables → User variables**, then fully restart Desktop. The Models card is preferred because it stores the PAT in the DSH credentials service without putting the secret in the process environment.
@@ -95,6 +96,12 @@ In Desktop, disable and remove the bundle from **Plugins**. For the CLI:
 ```sh
 dsh plugin --profile web remove dsh-provider-qoder
 ```
+
+## Credits
+
+Forked from [minglu6/dsh-provider-qoder](https://github.com/minglu6/dsh-provider-qoder).
+
+The client quota surfaces adapt the two-surface layout, the ref-counted polling helper, and the usage-module file split from [Mars-Sea/dsh-commandcode-provider](https://github.com/Mars-Sea/dsh-commandcode-provider) (MIT). See [NOTICE](NOTICE).
 
 ## License
 

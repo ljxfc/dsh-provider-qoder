@@ -1,0 +1,15 @@
+dsh-provider-qoder
+Copyright (c) 2026 minglu6
+
+This is a fork of minglu6/dsh-provider-qoder, maintained at
+https://github.com/ljxfc/dsh-provider-qoder.
+
+Portions of the client quota surfaces are adapted from dsh-commandcode-provider
+(https://github.com/Mars-Sea/dsh-commandcode-provider), Copyright (c) 2026
+Mars-Sea, licensed under the MIT License. The adapted parts are the two-surface
+layout of the sidebar card and the quota panel, the ref-counted polling helper,
+and the usage-module file split.
+
+Qoder and Qoder CN are products of their respective owners. This project is not
+affiliated with or endorsed by them, and your use of the Qoder service is
+governed by Qoder's own terms.

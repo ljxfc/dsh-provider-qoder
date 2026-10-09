@@ -18,9 +18,9 @@
 
 这条 GitHub 安装路径就是 Desktop 的推荐流程。插件包声明了 `dsh.bundle.patch`，并自带构建产物 `dist/index.js`，因此 Desktop 不需要保持 `qodercn` 进程运行。
 
-该包声明了**零运行时依赖**，而且构建产物已提交进仓库，所以安装它只新增一个包、不执行构建、也不拉取别的任何东西：它发布的六个文件就是插件的全部。带 tag 的版本列在 **Releases** 下，当前为 `v0.2.0`。
+该包声明了**零运行时依赖**，而且构建产物已提交进仓库，所以安装它只新增一个包、不执行构建、也不拉取别的任何东西：它发布的文件就是插件的全部。带 tag 的版本列在 **Releases** 下，当前为 `v0.2.0`。
 
-如果要测试尚未推送的本地副本，Desktop 的 **Add plugin** 对话框也接受绝对目录路径，例如 `D:\plugins\dsh-provider-qoder`。
+如果要测试尚未推送的本地副本，Desktop 的 **Add plugin** 对话框也接受绝对目录路径——填你自己的检出目录，例如 `C:\src\dsh-provider-qoder`。
 
 ## PAT 配置
 
@@ -32,7 +32,8 @@
 # 必须先完全关闭 Desktop。`$env:` 只会被本 PowerShell 进程启动的子进程继承。
 Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | Stop-Process
 $env:QODERCN_PERSONAL_ACCESS_TOKEN = 'pt-your-qoder-pat'
-Start-Process 'D:\DeepSeek Harness\DeepSeek Harness.exe'
+# 改成 Desktop 实际的安装位置。
+Start-Process '<你的安装目录>\DeepSeek Harness.exe'
 ```
 
 若要在 Windows 上长期生效，可在 **Windows 设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → 用户变量** 里添加同名同值，然后完全重启 Desktop。推荐用 Models 卡片的方式，因为它把 PAT 存进 DSH 凭据服务，而不会把密钥留在进程环境里。
@@ -94,6 +95,12 @@ dsh plugin --profile <profile> add github:ljxfc/dsh-provider-qoder#v0.2.0
 ```sh
 dsh plugin --profile web remove dsh-provider-qoder
 ```
+
+## 致谢
+
+fork 自 [minglu6/dsh-provider-qoder](https://github.com/minglu6/dsh-provider-qoder)。
+
+客户端的额度界面参考了 [Mars-Sea/dsh-commandcode-provider](https://github.com/Mars-Sea/dsh-commandcode-provider)（MIT）：双界面布局、引用计数的轮询实现，以及 usage 相关模块的文件拆分方式均改编自它。详见 [NOTICE](NOTICE)。
 
 ## 许可证
 
