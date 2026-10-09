@@ -18,7 +18,7 @@ Use the Desktop plugin manager:
 
 This GitHub install path is the intended Desktop flow. The plugin package declares `dsh.bundle.patch` and includes the generated `dist/index.js`, so Desktop does not need a running `qodercn` process.
 
-The package declares **no runtime dependencies** and its build is committed, so installing it adds exactly one package, runs no build, and installs nothing else; the files it ships are the whole plugin. Tagged releases are listed under **Releases**; `v0.2.0` is the current one.
+The package declares **no runtime dependencies** and its build is committed, so installing it adds exactly one package, runs no build, and installs nothing else; the files it ships are the whole plugin. Tagged releases are listed under **Releases**; `v0.2.1` is the current one.
 
 To test an unpushed working copy, Desktop's **Add plugin** dialog also accepts an absolute local directory — the path to your own checkout, for example `C:\src\dsh-provider-qoder`.
 
@@ -79,10 +79,10 @@ For a DSH CLI or source checkout, the equivalent package operation is:
 dsh plugin --profile web add https://github.com/ljxfc/dsh-provider-qoder
 ```
 
-It is a `pnpm add` inside the profile, so a package specifier pins the version — verified end to end against `v0.2.0`:
+It is a `pnpm add` inside the profile, so a package specifier pins the version — verified end to end against `v0.2.0`. `v0.2.1` changes only the credits and the docs:
 
 ```sh
-dsh plugin --profile <profile> add github:ljxfc/dsh-provider-qoder#v0.2.0
+dsh plugin --profile <profile> add github:ljxfc/dsh-provider-qoder#v0.2.1
 ```
 
 Either form also records the package in the profile's `dsh.profile.bundles`, so the bundle is enabled on the next start rather than needing a second step.
