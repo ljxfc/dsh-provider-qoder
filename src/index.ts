@@ -22,6 +22,7 @@ import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_KNOWN_MODELS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   QoderAdapter,
@@ -33,6 +34,7 @@ import type { QoderLang } from './annotate.ts'
 
 export {
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_KNOWN_MODELS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   parseQoderModelCatalog,

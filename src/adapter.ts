@@ -117,6 +117,22 @@ export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 export const DEFAULT_MAX_TOKENS = 32_768
 /** Selector-annotation language used when a connection does not choose one. */
 export const DEFAULT_ANNOTATION_LANGUAGE: QoderLang = 'zh'
+
+/**
+ * Known default models returned when no PAT has been configured yet, so the
+ * model selector and settings page populate readable model entries instead of
+ * failing with a missing-credential error.
+ */
+export const DEFAULT_KNOWN_MODELS: readonly QoderCatalogModel[] = Object.freeze([
+  { id: 'qwen3.8-max', name: 'Qwen 3.8 Max', reasoning: true, contextWindow: 200_000, maxTokens: 32_768 },
+  { id: 'qwen3.8-flash', name: 'Qwen 3.8 Flash', free: true, contextWindow: 1_000_000, maxTokens: 32_768 },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', reasoning: true, contextWindow: 128_000, maxTokens: 32_768 },
+  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 128_000, maxTokens: 32_768 },
+  { id: 'glm-5.3', name: 'GLM 5.3', reasoning: true, inputModalities: ['text', 'image'], contextWindow: 200_000, maxTokens: 32_768 },
+  { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', contextWindow: 200_000, maxTokens: 32_768 },
+  { id: 'kimi-k3', name: 'Kimi K3', reasoning: true, contextWindow: 200_000, maxTokens: 32_768 },
+  { id: 'minimax-m2.7', name: 'MiniMax M2.7', reasoning: true, contextWindow: 200_000, maxTokens: 32_768 },
+])
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 const OFF_REASONING_EFFORT = ReasoningEffortId('off')
@@ -322,7 +338,15 @@ export class QoderAdapter extends LlmAdapter {
     signal?: AbortSignal,
   ): Promise<readonly QoderCatalogModel[]> {
     if (connection.models !== undefined) return connection.models
-    const rawPat = await this.config.resolveApiKey(connection)
+    let rawPat: string
+    try {
+      rawPat = await this.config.resolveApiKey(connection)
+    } catch (error: unknown) {
+      if (error instanceof LlmError && error.code === 'MISSING_CREDENTIAL') {
+        return DEFAULT_KNOWN_MODELS
+      }
+      throw error
+    }
     const cacheKey = `${connection.endpoints.gateway}\0${hashCredential(rawPat)}`
     const cached = modelCatalogCache.get(cacheKey)
     if (!refresh && cached !== undefined) return cached

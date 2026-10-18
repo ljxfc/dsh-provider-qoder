@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { Config, getQoderCNDirectModel, getQoderCNFriendlyModelInfo, parseQoderModelCatalog, QoderAdapter } from '../dist/index.js'
+import { LlmError } from '@deepseek-ai/dsh-llm'
+import { Config, DEFAULT_KNOWN_MODELS, getQoderCNDirectModel, getQoderCNFriendlyModelInfo, parseQoderModelCatalog, QoderAdapter } from '../dist/index.js'
 
 const endpoints = {
   gateway: 'https://tenant-gateway.vpc.qoder.com.cn',
@@ -226,4 +227,19 @@ test('cancels first-use dynamic resolution with the caller signal', async (t) =>
   const resolution = adapter.resolveModel('qoder-cn', 'gmodel', controller.signal)
   controller.abort('test cancellation')
   await assert.rejects(resolution, error => error?.code === 'ABORTED')
+})
+
+test('gracefully falls back to default known models when no PAT is configured', async () => {
+  const adapter = new QoderAdapter({
+    options: () => connection(),
+    resolveApiKey: async () => {
+      throw new LlmError('no PAT configured', 'MISSING_CREDENTIAL')
+    },
+    resolveAttachments: () => undefined,
+  })
+  const models = await adapter.listModels('qoder-cn')
+  assert.ok(models.length > 0)
+  assert.equal(models.some(m => m.id === 'deepseek-v4-pro'), true)
+  assert.equal(models.some(m => m.id === 'qwen3.8-max'), true)
+  assert.equal(models.some(m => m.id === 'glm-5.3'), true)
 })

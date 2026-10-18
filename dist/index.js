@@ -1054,6 +1054,16 @@ var DEFAULT_STREAM_IDLE_TIMEOUT_MS = 3e5;
 var DEFAULT_CONTEXT_WINDOW = 1e6;
 var DEFAULT_MAX_TOKENS = 32768;
 var DEFAULT_ANNOTATION_LANGUAGE = "zh";
+var DEFAULT_KNOWN_MODELS = Object.freeze([
+  { id: "qwen3.8-max", name: "Qwen 3.8 Max", reasoning: true, contextWindow: 2e5, maxTokens: 32768 },
+  { id: "qwen3.8-flash", name: "Qwen 3.8 Flash", free: true, contextWindow: 1e6, maxTokens: 32768 },
+  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", reasoning: true, contextWindow: 128e3, maxTokens: 32768 },
+  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", contextWindow: 128e3, maxTokens: 32768 },
+  { id: "glm-5.3", name: "GLM 5.3", reasoning: true, inputModalities: ["text", "image"], contextWindow: 2e5, maxTokens: 32768 },
+  { id: "glm-5.3-flash", name: "GLM 5.3 Flash", contextWindow: 2e5, maxTokens: 32768 },
+  { id: "kimi-k3", name: "Kimi K3", reasoning: true, contextWindow: 2e5, maxTokens: 32768 },
+  { id: "minimax-m2.7", name: "MiniMax M2.7", reasoning: true, contextWindow: 2e5, maxTokens: 32768 }
+]);
 var STREAM_IDLE_TIMEOUT_CODE = "LLM_STREAM_IDLE_TIMEOUT";
 var OFF_REASONING_EFFORT = ReasoningEffortId("off");
 var HIGH_REASONING_EFFORT = ReasoningEffortId("high");
@@ -1197,7 +1207,15 @@ var QoderAdapter = class extends LlmAdapter {
   }
   async catalogModels(connection, refresh, signal) {
     if (connection.models !== void 0) return connection.models;
-    const rawPat = await this.config.resolveApiKey(connection);
+    let rawPat;
+    try {
+      rawPat = await this.config.resolveApiKey(connection);
+    } catch (error) {
+      if (error instanceof LlmError4 && error.code === "MISSING_CREDENTIAL") {
+        return DEFAULT_KNOWN_MODELS;
+      }
+      throw error;
+    }
     const cacheKey = `${connection.endpoints.gateway}\0${hashCredential(rawPat)}`;
     const cached = modelCatalogCache.get(cacheKey);
     if (!refresh && cached !== void 0) return cached;
@@ -2126,6 +2144,7 @@ function apply(ctx, config) {
 export {
   Config,
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_KNOWN_MODELS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DONE,
