@@ -62,6 +62,8 @@ The adapter is bound to an **account**, not to an organisation, tenancy, or plan
 
 The public CN cloud path is verified end to end against a live team account (Teams plan, organisation member, zero VPC configuration). The private VPC path is implemented — endpoint derivation included — but has not been exercised against a real tenant, and neither has a free or personal account. Treat those as untested: if one misbehaves, an issue with the response you got is the fastest fix.
 
+**Known issue**: without `/goal` mode, a longer task can end its turn after a minute or two and needs a manual "continue". The symptom, the current hypothesis, what has been ruled out, and the workarounds are recorded in [docs/known-issues.zh-CN.md](docs/known-issues.zh-CN.md) (Chinese).
+
 ## Plans and quota
 
 The client half can show Qoder CN's plan and credit usage in two places.
