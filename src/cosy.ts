@@ -250,7 +250,8 @@ export function prettifyQoderCNModelName(name: string): string {
     .replace(/\s*·\s*Qoder CN\s*$/i, '')
     .replace(/Qwen(\d)/g, 'Qwen $1')
     .replace(/Qwen([\d.]+)-/g, 'Qwen $1 ')
-    .replace(/DeepSeek\s*V(\d)-/g, 'DeepSeek V$1 ')
+    .replace(/\b(DeepSeek|GLM|Kimi|MiniMax)-/gi, '$1 ')
+    .replace(/\b(DeepSeek\s+V[\d.]+|GLM\s+[\d.]+|Kimi\s+K[\d.]+|MiniMax\s+M[\d.]+)-/gi, '$1 ')
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -278,9 +279,13 @@ export function getQoderCNFriendlyModelInfo(
   key: string,
   display?: string,
 ): { id: string; name: string } {
-  return qoderCNFriendlyModels[key] ?? {
-    id: key,
-    name: prettifyQoderCNModelName(display ?? key),
+  const known = qoderCNFriendlyModels[key]
+  const liveName = display?.trim()
+  return {
+    // Saved selector ids must retain their original gateway route. Labels,
+    // however, belong to the live catalog: Qoder can upgrade a rolling key.
+    id: known?.id ?? key,
+    name: liveName ? prettifyQoderCNModelName(liveName) : known?.name ?? prettifyQoderCNModelName(key),
   }
 }
 

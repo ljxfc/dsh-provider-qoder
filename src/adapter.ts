@@ -205,7 +205,7 @@ export function parseQoderModelCatalog(value: unknown): QoderCatalogModel[] {
     if (key.length === 0 || entry?.enable !== true) continue
     const display = typeof entry.display_name === 'string' && entry.display_name.trim().length > 0
       ? entry.display_name.trim()
-      : key
+      : undefined
     const identity = getQoderCNFriendlyModelInfo(key, display)
     if (seen.has(identity.id)) continue
     seen.add(identity.id)

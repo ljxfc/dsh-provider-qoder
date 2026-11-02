@@ -191,6 +191,30 @@ test('every published model id maps back to the wire key that serves it', () => 
   assert.equal(getQoderCNDirectModel(undefined), 'auto')
 })
 
+test('live display names override stale labels without changing saved model routes', () => {
+  const models = parseQoderModelCatalog({ chat: [
+    { key: 'mmodel', enable: true, display_name: 'MiniMax-M3.1-Flash' },
+    { key: 'dfmodel', enable: true, display_name: 'DeepSeek-Flash' },
+    { key: 'gmodel', enable: true, display_name: 'GLM-5.4' },
+    { key: 'dsv4.1flash1017', enable: true, display_name: 'DeepSeek-V4.1-Flash' },
+  ] })
+  assert.deepEqual(models.map(({ id, name }) => ({ id, name })), [
+    { id: 'minimax-m2.7', name: 'MiniMax M3.1 Flash' },
+    { id: 'deepseek-v4-flash', name: 'DeepSeek Flash' },
+    { id: 'glm-5.3', name: 'GLM 5.4' },
+    { id: 'dsv4.1flash1017', name: 'DeepSeek V4.1 Flash' },
+  ])
+  assert.deepEqual(models.map(model => getQoderCNDirectModel(model.id)), [
+    'mmodel', 'dfmodel', 'gmodel', 'dsv4.1flash1017',
+  ])
+  assert.equal(parseQoderModelCatalog({ chat: [
+    { key: 'mmodel', enable: true, display_name: '  ' },
+  ] })[0].name, 'MiniMax M2.7')
+  assert.deepEqual(getQoderCNFriendlyModelInfo('mmodel', '  '), {
+    id: 'minimax-m2.7', name: 'MiniMax M2.7',
+  })
+})
+
 test('uses an explicit static catalog without contacting Qoder discovery', async (t) => {
   const originalFetch = globalThis.fetch
   t.after(() => { globalThis.fetch = originalFetch })
