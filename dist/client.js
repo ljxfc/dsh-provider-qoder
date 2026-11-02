@@ -1400,7 +1400,8 @@ var PROVIDER_CSS = `
 [data-qoder-models-card] .qoder-muted,[data-qoder-models-card] small { opacity:.7; font-size:12px; }
 [data-qoder-models-card] .qoder-inline { display:flex; gap:8px; align-items:center; }
 [data-qoder-models-card] input:not([type=checkbox]),[data-qoder-models-card] select { min-width:0; width:100%; color:inherit; background:var(--qoder-bg); border:1px solid var(--qoder-line); padding:9px 10px; border-radius:8px; font:inherit; }
-[data-qoder-models-card] select option { color:var(--dsw-alias-label-primary,#222); background:var(--dsw-alias-bg-module,#fff); }
+[data-qoder-models-card] select { color-scheme:light; }
+[data-qoder-models-card] select option { color:#20242b; background-color:#fff; }
 [data-qoder-models-card] input:focus-visible,[data-qoder-models-card] select:focus-visible,[data-qoder-models-card] button:focus-visible,[data-qoder-models-card] summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#5476de); outline-offset:3px; }
 [data-qoder-models-card] button { color:inherit; border:1px solid var(--qoder-line); background:var(--qoder-bg); padding:7px 12px; border-radius:8px; font:inherit; cursor:pointer; white-space:nowrap; }
 [data-qoder-models-card] button:hover:not(:disabled) { background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.15)); }
