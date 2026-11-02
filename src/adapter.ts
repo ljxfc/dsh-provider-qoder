@@ -760,12 +760,13 @@ export class QoderAdapter extends LlmAdapter {
       return exchanged.jobToken
     } catch (error: unknown) {
       // A rejected exchange is either a credential problem (bad PAT, wrong
-      // tenant host) or a transport/outage problem. Only 401/403 mean the PAT
-      // itself is unusable; a 5xx from the exchange host is transient and must
-      // stay retryable, so it surfaces as SERVER rather than AUTH.
+      // tenant host) or a transport/outage problem. Reuse the one status
+      // classifier the rest of the adapter uses so the code stays truthful per
+      // status: 401/403 are AUTH, 429 is RATE_LIMIT, 400 is INVALID_REQUEST, a
+      // 5xx is retryable SERVER, and anything else keeps its own HTTP_<status>.
+      // Collapsing every non-auth status into SERVER hid rate limiting.
       if (error instanceof QoderTokenError) {
-        const credential = error.status === 401 || error.status === 403
-        throw new LlmError(error.message, credential ? 'AUTH' : 'SERVER', { cause: error })
+        throw new LlmError(error.message, httpErrorCode(error.status, error.message), { cause: error })
       }
       throw error
     }
@@ -786,10 +787,11 @@ export class QoderAdapter extends LlmAdapter {
       info = await fetchUserInfo(jobToken, endpoints, signal)
     } catch (error: unknown) {
       if (signal?.aborted) throw error
-      // An unreachable or failing /userinfo is an outage, not a verdict on the
-      // PAT: only a rejected token is AUTH, everything else stays retryable.
-      if (error instanceof QoderTokenError && (error.status === 401 || error.status === 403)) {
-        throw new LlmError(error.message, 'AUTH', { cause: error })
+      // An answered-but-refused /userinfo keeps its own status meaning (401/403
+      // AUTH, 429 RATE_LIMIT, 5xx SERVER); only a request that never reached the
+      // host is TRANSPORT.
+      if (error instanceof QoderTokenError) {
+        throw new LlmError(error.message, httpErrorCode(error.status, error.message), { cause: error })
       }
       throw new LlmError(
         'Qoder CN identity lookup could not reach /userinfo',

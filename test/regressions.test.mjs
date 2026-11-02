@@ -278,3 +278,51 @@ test('an unknown model still uses the configured default window', async () => {
   const resolved = await adapter.resolveModel('qoder-cn', 'brand-new-key')
   assert.equal(resolved.context.contextWindow, 1_000_000)
 })
+
+test('the token exchange keeps a truthful error code per HTTP status', async () => {
+  // Collapsing every non-auth status into SERVER hid rate limiting behind a
+  // retryable server error, so each status is pinned to its own code.
+  const expected = [
+    [401, 'AUTH'],
+    [403, 'AUTH'],
+    [400, 'INVALID_REQUEST'],
+    [404, 'HTTP_404'],
+    [429, 'RATE_LIMIT'],
+    [500, 'SERVER'],
+    [503, 'SERVER'],
+  ]
+  for (const [status, code] of expected) {
+    assert.equal(await statusOfExchange(status), code, `HTTP ${status} should map to ${code}`)
+  }
+})
+
+test('a rejected /userinfo keeps its status meaning instead of reading as transport', async () => {
+  const original = globalThis.fetch
+  const endpoints = { gateway: 'https://g', openapi: 'https://o', manage: 'https://m' }
+  const statusOfIdentity = async (status) => {
+    globalThis.fetch = async (input) => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) {
+        return Response.json({ token: 'jt', refresh_token: 'jrt', expires_in: 86_400_000 })
+      }
+      return { ok: false, status, statusText: 'stub', text: async () => '' }
+    }
+    try {
+      // Streaming reaches ensureIdentity; any LlmError code is what we assert on.
+      for await (const _ of adapterAnswering(status).stream({
+        model: 'glm-5.3',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        reasoningEffort: 'off',
+      })) { /* drain */ }
+      return 'no error'
+    } catch (error) {
+      return error.code
+    } finally {
+      globalThis.fetch = original
+    }
+  }
+  assert.equal(await statusOfIdentity(401), 'AUTH')
+  assert.equal(await statusOfIdentity(429), 'RATE_LIMIT')
+  assert.equal(await statusOfIdentity(503), 'SERVER')
+  assert.equal(await statusOfIdentity(404), 'HTTP_404')
+})

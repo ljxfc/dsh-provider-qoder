@@ -1668,8 +1668,7 @@ var QoderAdapter = class extends LlmAdapter {
       return exchanged.jobToken;
     } catch (error) {
       if (error instanceof QoderTokenError) {
-        const credential = error.status === 401 || error.status === 403;
-        throw new LlmError4(error.message, credential ? "AUTH" : "SERVER", { cause: error });
+        throw new LlmError4(error.message, httpErrorCode(error.status, error.message), { cause: error });
       }
       throw error;
     }
@@ -1684,8 +1683,8 @@ var QoderAdapter = class extends LlmAdapter {
       info = await fetchUserInfo(jobToken, endpoints, signal);
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (error instanceof QoderTokenError && (error.status === 401 || error.status === 403)) {
-        throw new LlmError4(error.message, "AUTH", { cause: error });
+      if (error instanceof QoderTokenError) {
+        throw new LlmError4(error.message, httpErrorCode(error.status, error.message), { cause: error });
       }
       throw new LlmError4(
         "Qoder CN identity lookup could not reach /userinfo",

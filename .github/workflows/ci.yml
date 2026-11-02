@@ -1,0 +1,50 @@
+# Build, test, and prove the committed bundle still matches its source.
+#
+# `dist/` is tracked and published as the package's only runtime code, so a
+# stale bundle would ship silently. The jobs below rebuild from `src/` and fail
+# if the result differs from what is committed.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # `npm test` runs the esbuild build first, then the node:test suite.
+      - name: Build and test
+        run: npm test
+
+      # Fails when src/ changes without a matching dist/ rebuild.
+      - name: Verify the committed bundle matches its source
+        run: |
+          if ! git diff --exit-code --stat -- dist; then
+            echo "::error::dist/ is stale — run 'npm run build' and commit the result."
+            exit 1
+          fi
+
+      - name: Check the published package contents
+        if: matrix.node == '24'
+        run: npm pack --dry-run
