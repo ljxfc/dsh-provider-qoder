@@ -18,7 +18,7 @@
 
 这条 GitHub 安装路径就是 Desktop 的推荐流程。插件包声明了 `dsh.bundle.patch`，并自带构建产物 `dist/index.js`，因此 Desktop 不需要保持 `qodercn` 进程运行。
 
-该包声明了**零运行时依赖**，而且构建产物已提交进仓库，所以安装它只新增一个包、不执行构建、也不拉取别的任何东西：它发布的文件就是插件的全部。带 tag 的版本列在 **Releases** 下，当前为 `v0.2.1`。
+该包声明了**零运行时依赖**，而且构建产物已提交进仓库，所以安装它只新增一个包、不执行构建、也不拉取别的任何东西：它发布的文件就是插件的全部。带 tag 的版本列在 **Releases** 下，当前为 `v0.3.0`。
 
 如果要测试尚未推送的本地副本，Desktop 的 **Add plugin** 对话框也接受绝对目录路径——填你自己的检出目录，例如 `C:\src\dsh-provider-qoder`。
 
@@ -108,10 +108,10 @@ llm-qoder:
 dsh plugin --profile web add https://github.com/ljxfc/dsh-provider-qoder
 ```
 
-它本质上是在该 profile 里执行 `pnpm add`，因此可以用包说明符锁定版本——已针对 `v0.2.0` 端到端验证。`v0.2.1` 只改了署名和文档：
+它本质上是在该 profile 里执行 `pnpm add`，因此可以用包说明符锁定版本——已针对 `v0.2.0` 端到端验证。`v0.3.0` 新增上下文与输出容量设置，并改版了提供方卡片：
 
 ```sh
-dsh plugin --profile <profile> add github:ljxfc/dsh-provider-qoder#v0.2.1
+dsh plugin --profile <profile> add github:ljxfc/dsh-provider-qoder#v0.3.0
 ```
 
 两种写法都会把该包记入 profile 的 `dsh.profile.bundles`，因此 bundle 会在下次启动时启用，不需要第二步操作。

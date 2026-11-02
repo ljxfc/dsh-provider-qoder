@@ -53,7 +53,7 @@ if(c?.contextWindow!==void 0&&UE(O,c.contextWindow))
 
 短请求验证了1M档位的协议接受，不代表送入完整百万token、长期稳定性或每个模型/套餐均支持1M。500K在本次选用模型的目录中并未声明，因此只验证本地选择/持久化/警告，不声称其服务端支持。真实端到端使用公网CN团队账号；私有VPC、免费/个人账户和其他Desktop版本本次未新增实测。
 
-原桌面进程保持运行；测试使用独立 DSH_HOME。真实PAT仅由原凭据读取到内存，再通过测试进程环境传入，未写入测试凭据文件。测试进程在验收后关闭。未发布npm或GitHub版本。
+原桌面进程保持运行；测试使用独立 DSH_HOME。真实PAT仅由原凭据读取到内存，再通过测试进程环境传入，未写入测试凭据文件。测试进程在验收后关闭。验收当时未发布 npm 或 GitHub 版本；发布记录见 [Releases](https://github.com/ljxfc/dsh-provider-qoder/releases)。
 
 ## 复现
 
