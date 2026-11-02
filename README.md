@@ -22,6 +22,8 @@ The package declares **no runtime dependencies** and its build is committed, so 
 
 To test an unpushed working copy, Desktop's **Add plugin** dialog also accepts an absolute local directory — the path to your own checkout, for example `C:\src\dsh-provider-qoder`.
 
+A step-by-step record of a real setup — what was opened, where it was installed, why each choice was made, and which symptoms mapped to which cause — is in [`docs/setup-walkthrough.zh-CN.md`](docs/setup-walkthrough.zh-CN.md) (Chinese).
+
 ## PAT configuration
 
 After opening the `qoder-cn` row's **Edit** card in **Models**, paste the PAT into the Qoder card and click **Save**. The client extension writes it through the DSH credentials service under `QODERCN_PERSONAL_ACCESS_TOKEN`; the PAT is not written to the settings document.

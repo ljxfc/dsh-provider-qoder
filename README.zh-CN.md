@@ -22,6 +22,8 @@
 
 如果要测试尚未推送的本地副本，Desktop 的 **Add plugin** 对话框也接受绝对目录路径——填你自己的检出目录，例如 `C:\src\dsh-provider-qoder`。
 
+一次真实接入的逐步记录（每一步打开什么、装到哪、为什么这么配、踩过哪些坑）见 [`docs/setup-walkthrough.zh-CN.md`](docs/setup-walkthrough.zh-CN.md)。
+
 ## PAT 配置
 
 在 **Models** 中打开 `qoder-cn` 那一行的 **Edit** 卡片后，把 PAT 粘贴进 Qoder 卡片并点击 **Save**。客户端扩展会通过 DSH 凭据服务以 `QODERCN_PERSONAL_ACCESS_TOKEN` 写入；PAT 不会被写进设置文档。
