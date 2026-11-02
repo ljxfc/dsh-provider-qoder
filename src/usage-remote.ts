@@ -23,6 +23,7 @@ import {
   REMOTE_NAMESPACE,
   REMOTE_SERVICE,
   type QuotaSnapshotWire,
+  type ModelCapacityWire,
 } from './usage-wire.ts'
 
 /** Everything the quota service needs beyond its Cordis context. */
@@ -64,6 +65,11 @@ export function toQuotaSnapshot(report: QoderUsageReport): QuotaSnapshotWire {
 export class QoderUsageService extends TypertRemoteService {
   constructor(ctx: Context, private readonly deps: QoderUsageDeps) {
     super(ctx, REMOTE_SERVICE, { namespace: REMOTE_NAMESPACE })
+  }
+
+  /** Read-only catalog capabilities and effective configured budgets. */
+  async models(): Promise<ModelCapacityWire[]> {
+    return this.deps.adapter.getModelCapacities()
   }
 
   /**

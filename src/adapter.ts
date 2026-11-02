@@ -10,6 +10,8 @@
  */
 
 import crypto from 'node:crypto'
+import { resolveCapacity, selectedGatewayContext, type CapacitySettings } from './capacity.ts'
+import type { ModelCapacityWire } from './usage-wire.ts'
 import { attributionHeaders, CONTEXT_WINDOW_EXCEEDED_CODE, isContextWindowExceededError, isQuotaExceededError, LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -37,7 +39,7 @@ import { fetchQoderQuota, type QoderUsageReport } from './usage.ts'
 import { serializeMessages, systemTextOf, transformTools, lastUserText } from './serialize.ts'
 import { parseQoderSse, DONE, parseEnvelope } from './sse.ts'
 import { translate } from './translate.ts'
-import { compareModelsForSelector, modelDescription, modelSelectorLabel, parsePromotion } from './annotate.ts'
+import { compareModelsForSelector, formatContextWindow, modelDescription, modelSelectorLabel, parsePromotion } from './annotate.ts'
 import type { QoderLang, QoderModelPromotion } from './annotate.ts'
 
 /** One catalog model entry advertised by the adapter. */
@@ -50,6 +52,9 @@ export interface QoderCatalogModel {
   description?: string
   /** Known combined request/response context capacity. */
   contextWindow?: number
+  contextWindows?: number[]
+  /** Original advertised tier identifiers, not guessed request parameters. */
+  contextTiers?: Record<string, number>
   /** Per-request output cap; omission falls back to the connection default. */
   maxTokens?: number
   /** Accepted request modalities; absent means text. */
@@ -65,7 +70,7 @@ export interface QoderCatalogModel {
 }
 
 /** Validated connection facts for one operation. */
-export interface QoderConnectionOptions {
+export interface QoderConnectionOptions extends CapacitySettings {
   /** Resolved CN endpoints (public or VPC-derived). */
   endpoints: QoderCnEndpoints
   /** Credential reference resolved per request. */
@@ -162,7 +167,7 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
 }
 
 function positiveInteger(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined
 }
@@ -210,6 +215,13 @@ export function parseQoderModelCatalog(value: unknown): QoderCatalogModel[] {
     if (seen.has(identity.id)) continue
     seen.add(identity.id)
     const contextWindow = contextWindowOf(entry)
+    const contextTiers: Record<string, number> = {}
+    for (const [id, raw] of Object.entries(recordOf(entry.context_config) ?? {})) {
+      const count = positiveInteger(recordOf(raw)?.token_count)
+      if (count !== undefined) Object.defineProperty(contextTiers, id, { value: count, enumerable: true })
+    }
+    const advertised = entry.available_context_windows ?? entry.availableContextWindows
+    const contextWindows = [...new Set([...Object.values(contextTiers), ...(Array.isArray(advertised) ? advertised.flatMap(value => positiveInteger(value) ?? []) : [])])].sort((a, b) => a - b)
     const maxTokens = positiveInteger(entry.max_output_tokens)
     const promotion = parsePromotion(entry.promotion)
     const priceFactor = positiveNumber(entry.price_factor)
@@ -217,6 +229,8 @@ export function parseQoderModelCatalog(value: unknown): QoderCatalogModel[] {
       id: identity.id,
       name: identity.name,
       ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(contextWindows.length === 0 ? {} : { contextWindows }),
+      ...(Object.keys(contextTiers).length === 0 ? {} : { contextTiers }),
       ...(maxTokens === undefined ? {} : { maxTokens }),
       inputModalities: entry.is_vl === true ? ['text', 'image'] : ['text'],
       reasoning: entry.is_reasoning === true || recordOf(entry.thinking_config) !== undefined,
@@ -254,19 +268,26 @@ function modelInfo(
   model: QoderCatalogModel,
   lang: QoderLang = DEFAULT_ANNOTATION_LANGUAGE,
   plans?: Record<string, string>,
+  connection?: QoderConnectionOptions,
 ): LlmModelInfo {
+  const selected = connection?.modelLimits?.[model.id]?.contextWindow ?? connection?.contextWindowOverride
+  const supported = connection === undefined ? undefined : selectedGatewayContext(connection, model)
+  const displayModel = supported === undefined ? model : { ...model, contextWindow: supported }
+  const localNote = selected !== undefined && supported === undefined
+    ? `${lang === 'zh' ? '本地预算' : 'Local budget'} ${formatContextWindow(selected)}`
+    : undefined
   // The minimum-plan label is the one annotation Qoder's API does not report,
   // so it comes from the operator's map; an unmapped model carries none.
   const plan = plans?.[model.id]
-  const annotated = plan === undefined || plan.length === 0 ? model : { ...model, plan }
-  const description = modelDescription(annotated, lang)
+  const annotated = plan === undefined || plan.length === 0 ? displayModel : { ...displayModel, plan }
+  const description = [modelDescription(annotated, lang), localNote].filter(Boolean).join(' · ') || undefined
   return {
     provider,
     id: model.id,
     // The 0.2.0 selector renders model names only, so the annotations ride the
     // name — that is the only channel the picker displays. `description` still
     // carries the same text for any surface that does render it.
-    name: modelSelectorLabel(annotated, lang),
+    name: [modelSelectorLabel(annotated, lang), localNote].filter(Boolean).join(' · '),
     ...description === undefined ? {} : { description },
     ...model.inputModalities === undefined ? {} : { inputModalities: model.inputModalities },
   }
@@ -297,7 +318,7 @@ export class QoderAdapter extends LlmAdapter {
     // Free models cost no credits and are usable by every account, so they are
     // hoisted to the top of the picker instead of hiding among the paid ones.
     return [...models].sort(compareModelsForSelector)
-      .map(model => modelInfo(provider, model, lang, connection.annotationPlans))
+      .map(model => modelInfo(provider, model, lang, connection.annotationPlans, connection))
   }
 
   override async resolveModel(
@@ -314,9 +335,7 @@ export class QoderAdapter extends LlmAdapter {
     // request can grow to a size the gateway rejects, so the harness never
     // compacts and the turn dies mid-task on a 400.
     const known = DEFAULT_KNOWN_MODELS.find(entry => entry.id === model)
-    const contextWindow = configured?.contextWindow
-      ?? known?.contextWindow
-      ?? connection.defaultContextWindow
+    const capacity = resolveCapacity(connection, configured ?? { id: model }, known)
     const reasoning = configured?.reasoning === true
     return {
       ...configured === undefined
@@ -326,9 +345,10 @@ export class QoderAdapter extends LlmAdapter {
           configured,
           connection.annotationLanguage ?? DEFAULT_ANNOTATION_LANGUAGE,
           connection.annotationPlans,
+          connection,
         ),
-      context: { contextWindow },
-      defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
+      context: { contextWindow: capacity.contextWindow },
+      defaultMaxTokens: capacity.maxTokens,
       ...reasoning
         ? {
           reasoning: {
@@ -338,6 +358,24 @@ export class QoderAdapter extends LlmAdapter {
         }
         : {},
     }
+  }
+
+  /** Read-only model capabilities and current local budgets. */
+  async getModelCapacities(signal?: AbortSignal): Promise<ModelCapacityWire[]> {
+    const connection = this.config.options()
+    const models = await this.catalogModels(connection, false, signal)
+    return models.map(model => {
+      const capacity = resolveCapacity(connection, model, DEFAULT_KNOWN_MODELS.find(entry => entry.id === model.id))
+      return {
+        id: model.id,
+        name: model.name ?? model.id,
+        ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+        ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+        contextWindows: [...(model.contextWindows ?? [])],
+        effectiveContextWindow: capacity.contextWindow,
+        effectiveMaxTokens: capacity.maxTokens,
+      }
+    })
   }
 
   private async catalogModels(
@@ -535,6 +573,20 @@ export class QoderAdapter extends LlmAdapter {
     rawPat: string,
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
+    // Legacy direct callers used the connection default rather than catalog output.
+    // New explicit capacity policy and explicit requests use the shared resolver.
+    const modelLimit = connection.modelLimits?.[options.model]
+    const legacyAutomatic = options.maxTokens === undefined
+      && connection.contextWindowOverride === undefined
+      && connection.maxOutputTokens === undefined
+      && modelLimit?.contextWindow === undefined
+      && modelLimit?.maxTokens === undefined
+    // Automatic direct generation must not gain a dependency on catalog availability.
+    const catalog = legacyAutomatic ? [] : await this.catalogModels(connection, false, signal)
+    const model = catalog.find(model => model.id === options.model) ?? { id: options.model }
+    const maxTokens = legacyAutomatic ? connection.maxTokens
+      : resolveCapacity(connection, model, DEFAULT_KNOWN_MODELS.find(model => model.id === options.model), options.maxTokens).maxTokens
+    const gatewayContext = legacyAutomatic ? undefined : selectedGatewayContext(connection, model)
     // 1. PAT → job token (cached; refreshed through the jrt when expired).
     const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal)
     // 2. Identity (userID required by the COSY envelope).
@@ -558,7 +610,6 @@ export class QoderAdapter extends LlmAdapter {
       .update(`qoder-session\0${identity.userID}\0${qoderModel}`)
       .digest('hex').slice(0, 16)
     const recordID = stableChatRecordID(qoderModel, options)
-    const maxTokens = options.maxTokens ?? connection.maxTokens
     const reasoningEnabled = options.reasoningEffort !== undefined && options.reasoningEffort !== 'off'
 
     const reqBody: Record<string, unknown> = {
@@ -584,6 +635,7 @@ export class QoderAdapter extends LlmAdapter {
       tools: tools ?? [],
       parameters: {
         max_tokens: maxTokens,
+        ...(gatewayContext === undefined ? {} : { context_length: gatewayContext }),
         ...reasoningEnabled ? { reasoning_effort: options.reasoningEffort } : {},
       },
       chat_context: {

@@ -223,7 +223,7 @@ export function QoderQuotaFooterEntry(props: QoderQuotaSurfaceProps): React.Reac
         className="qcp-rail"
         data-qoder-quota-card="true"
         aria-label={t.cardHint}
-        title={t.cardHint}
+        title={snapshot.status === 'error' && report !== undefined ? `${t.cardHint} · ${t.stale}` : t.cardHint}
         onClick={open}
       >
         <QuotaRing percent={percent} warn={warn} size={18} />
@@ -250,7 +250,7 @@ export function QoderQuotaFooterEntry(props: QoderQuotaSurfaceProps): React.Reac
           : badge === undefined ? null : <span className="qcp-badge">{badge}</span>}
       </span>
       {headline === undefined ? (
-        <span className="qcp-caption">{snapshot.status === 'error' ? t.error : t.loading}</span>
+          <span className="qcp-caption">{snapshot.status === 'error' ? t.error : t.loading}</span>
       ) : (
         <span className="qcp-row">
           <span className="qcp-rowHead">
@@ -264,7 +264,7 @@ export function QoderQuotaFooterEntry(props: QoderQuotaSurfaceProps): React.Reac
           </span>
           <QuotaBar percent={percent} warn={warn} label={t.personalPool} />
           <span className="qcp-caption">
-            {`${t.resetAt} ${formatMoment(report?.expiresAt, t.lang) ?? t.noDeadline}`}
+            {snapshot.status === 'error' ? t.stale : `${t.resetAt} ${formatMoment(report?.expiresAt, t.lang) ?? t.noDeadline}`}
           </span>
         </span>
       )}
@@ -317,7 +317,7 @@ export function QoderQuotaPanel(props: QoderQuotaSurfaceProps): React.ReactEleme
             <span className="qcp-sub">{t.panelSubtitle}</span>
           </div>
           <div className="qcp-actions">
-            <span className="qcp-meta">{`${t.refreshedAt} ${refreshed}`}</span>
+            <span className="qcp-meta" role="status">{`${snapshot.status === 'error' && report !== undefined ? t.stale : t.refreshedAt} · ${refreshed}`}</span>
             <button
               type="button"
               className="qcp-button"

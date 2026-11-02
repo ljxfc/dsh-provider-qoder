@@ -78,6 +78,7 @@ export function createQuotaController(resolve: QoderQuotaResolver): QuotaControl
     if (namespace === undefined) {
       if (ticket !== generation) return
       snapshot = {
+        ...snapshot,
         status: 'error',
         error: QUOTA_REMOTE_UNMOUNTED_ERROR,
         ...(snapshot.fetchedAt === undefined ? {} : { fetchedAt: snapshot.fetchedAt }),
@@ -91,6 +92,7 @@ export function createQuotaController(resolve: QoderQuotaResolver): QuotaControl
       snapshot = response.ok
         ? { status: 'ready', report: response.value, fetchedAt: Date.now() }
         : {
+            ...snapshot,
             status: 'error',
             error: response.error?.message ?? 'the quota read failed',
             ...(snapshot.fetchedAt === undefined ? {} : { fetchedAt: snapshot.fetchedAt }),
@@ -98,6 +100,7 @@ export function createQuotaController(resolve: QoderQuotaResolver): QuotaControl
     } catch (error: unknown) {
       if (ticket !== generation) return
       snapshot = {
+        ...snapshot,
         status: 'error',
         error: error instanceof Error ? error.message : String(error),
         ...(snapshot.fetchedAt === undefined ? {} : { fetchedAt: snapshot.fetchedAt }),

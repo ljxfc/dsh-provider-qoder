@@ -1,24 +1,11 @@
-/**
- * Qoder's provider card for 设置 → 模型.
- *
- * Two blocks, mirroring how the Command Code provider presents itself:
- *
- * - `账户` — the PAT editor. dsh renders an unknown provider family with a
- *   generic editor that has no API-key field, so this keyed provider-card slot
- *   supplies that one control and writes the PAT through the Host credentials
- *   service. The PAT is never put into the settings document or echoed back
- *   into the input.
- * - `集成与显示` — the `showSidebarQuota` toggle. It is the only switch for the
- *   sidebar quota card, and the same flag gates the background refresh.
- *
- * The card renders unconditionally: the row it sits in is owned by the Models
- * page, so nothing here may depend on the shape of its neighbours.
- */
-
 import * as React from 'react'
-import { useEffect, useRef, useState } from 'react'
-import type { QoderQuotaSettingsFace, QoderQuotaSettingsSnapshot } from './settings.ts'
-
+import { useEffect, useState, useId } from 'react'
+import { CapacitySection, CAPACITY_EN, type ModelsFace } from './capacity.tsx'
+import type {
+  CapacitySettingsFace,
+  QoderQuotaSettingsFace,
+} from './settings.ts'
+import type { QuotaController } from './quota.ts'
 export interface QoderCredentialSnapshot {
   ref: string
   configured: boolean
@@ -26,148 +13,301 @@ export interface QoderCredentialSnapshot {
   loading: boolean
   error?: string
 }
-
 export interface QoderCredentialFace {
   getSnapshot(): QoderCredentialSnapshot
   subscribe(listener: () => void): () => void
   refresh(): Promise<void>
   set(value: string): Promise<boolean>
 }
-
 export interface QoderProviderCardProps {
   t?: (key: string) => string
   credential: QoderCredentialFace
-  /** The `showSidebarQuota` toggle; absent when the settings remote is unmounted. */
   quotaSettings?: QoderQuotaSettingsFace
+  capacitySettings?: CapacitySettingsFace
+  models?: ModelsFace
+  quota?: QuotaController
+  openQuota?: () => void
   provider?: { active?: boolean }
   keyConfigured?: boolean
 }
-
-const SECTION_STYLE = { display: 'grid', gap: '8px', padding: '12px 0' } as const
-
-function defaultText(key: string): string {
-  return ({
-    title: 'Qoder CN',
-    configured: 'PAT configured',
-    notConfigured: 'PAT not configured',
-    patLabel: 'Qoder PAT',
-    patHint: 'Paste a pt-... Personal Access Token. It is stored in the DSH credentials service.',
-    save: 'Save',
-    saving: 'Saving…',
-    loading: 'Loading…',
-    readOnly: 'Credentials are read-only in this profile.',
-    saveFailed: 'The PAT could not be stored. Try again.',
-    integrations: 'Integrations & display',
-    quotaToggle: 'Show the quota card in the sidebar',
-    quotaToggleHint: 'Off by default; while off the sidebar renders no card and no background quota refresh runs.',
-    quotaToggleFailed: 'The toggle could not be stored. Try again.',
-  } as Record<string, string>)[key] ?? key
+const EN: Record<string, string> = {
+  ...CAPACITY_EN,
+  title: 'Qoder CN',
+  configured: 'PAT configured',
+  notConfigured: 'PAT not configured',
+  patLabel: 'Qoder PAT',
+  patHint:
+    'Paste a pt-... Personal Access Token. Stored securely in DSH credentials.',
+  save: 'Save',
+  saving: 'Saving…',
+  loading: 'Loading…',
+  readOnly: 'Credentials are read-only.',
+  saveFailed: 'The PAT could not be stored. Try again.',
+  integrations: 'Integrations & display',
+  quotaToggle: 'Show quota in the sidebar',
+  quotaToggleHint: 'Off by default. No sidebar background refresh while off.',
+  quotaToggleFailed: 'Settings could not be stored. Try again.',
 }
-
-/** Render one Qoder Models-card occurrence. */
-export function QoderProviderCard(props: QoderProviderCardProps): React.ReactElement {
-  const t = props.t ?? defaultText
-  const quota = props.quotaSettings
-  const [snapshot, setSnapshot] = useState(() => props.credential.getSnapshot())
-  const [quotaSnapshot, setQuotaSnapshot] = useState<QoderQuotaSettingsSnapshot | undefined>(
-    () => quota?.getSnapshot(),
+export function QoderProviderCard(
+  props: QoderProviderCardProps,
+): React.ReactElement {
+  const patId = useId()
+  const t = props.t ?? ((key: string) => EN[key] ?? key)
+  const [credential, setCredential] = useState(() =>
+    props.credential.getSnapshot(),
   )
+  const [settings, setSettings] = useState(() =>
+    props.quotaSettings?.getSnapshot(),
+  )
+  const [quota, setQuota] = useState(() => props.quota?.getSnapshot())
   const [draft, setDraft] = useState('')
+  const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
-  const [quotaBusy, setQuotaBusy] = useState(false)
-  const rootRef = useRef<HTMLDivElement | null>(null)
-
+  const [toggleBusy, setToggleBusy] = useState(false)
   useEffect(() => {
-    setSnapshot(props.credential.getSnapshot())
-    return props.credential.subscribe(() => setSnapshot(props.credential.getSnapshot()))
+    const dispose = props.credential.subscribe(() =>
+      setCredential(props.credential.getSnapshot()),
+    )
+    setCredential(props.credential.getSnapshot())
+    return dispose
   }, [props.credential])
-
   useEffect(() => {
-    if (quota === undefined) return undefined
-    setQuotaSnapshot(quota.getSnapshot())
-    return quota.subscribe(() => setQuotaSnapshot(quota.getSnapshot()))
-  }, [quota])
-
-  const configured = snapshot.loading ? props.keyConfigured === true : snapshot.configured
-  const disabled = saving || !snapshot.writable
-  const save = async (): Promise<void> => {
-    const value = draft.trim()
-    if (value.length === 0 || disabled) return
+    const dispose = props.quotaSettings?.subscribe(() =>
+      setSettings(props.quotaSettings?.getSnapshot()),
+    )
+    setSettings(props.quotaSettings?.getSnapshot())
+    return dispose
+  }, [props.quotaSettings])
+  useEffect(() => {
+    const dispose = props.quota?.subscribe(() =>
+      setQuota(props.quota?.getSnapshot()),
+    )
+    setQuota(props.quota?.getSnapshot())
+    return dispose
+  }, [props.quota])
+  const disabled =
+    saving || credential.loading || !credential.writable || !!credential.error
+  const save = async () => {
+    if (disabled || !draft.trim()) return
     setSaving(true)
     setFailed(false)
     try {
-      const ok = await props.credential.set(value)
-      if (ok) setDraft('')
-      else setFailed(true)
+      if (await props.credential.set(draft.trim())) {
+        setDraft('')
+        setEditing(false)
+      } else setFailed(true)
     } catch {
       setFailed(true)
     } finally {
       setSaving(false)
     }
   }
-
-  const quotaEnabled = quotaSnapshot?.enabled === true
-  const quotaReadOnly = quotaSnapshot === undefined
-    || quotaSnapshot.loading
-    || !quotaSnapshot.writable
-  const toggleQuota = async (next: boolean): Promise<void> => {
-    if (quota === undefined || quotaReadOnly || quotaBusy) return
-    setQuotaBusy(true)
-    try {
-      await quota.set(next)
-    } catch {
-      // `set` reports its own failure through the snapshot; nothing to add.
-    } finally {
-      setQuotaBusy(false)
-    }
-  }
-
+  const report = quota?.report
+  const date = (value: number) =>
+    new Date(value < 100000000000 ? value * 1000 : value).toLocaleDateString()
   return (
-    <div ref={rootRef} data-qoder-models-card="true">
-      <div style={SECTION_STYLE}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
-          <strong>{t('title')}</strong>
-          <span>{snapshot.loading ? t('loading') : configured ? t('configured') : t('notConfigured')}</span>
+    <div data-qoder-models-card="true">
+      <header className="qoder-header">
+        <div className="qoder-brand">
+          <span className="qoder-monogram" aria-hidden="true">
+            Q
+          </span>
+          <div>
+            <div className="qoder-title">{t('title')}</div>
+            <small>Qoder · China</small>
+          </div>
         </div>
-        <label style={{ display: 'grid', gap: '4px' }}>
-          <span>{t('patLabel')}</span>
-          <input
-            type="password"
-            autoComplete="new-password"
-            spellCheck={false}
-            value={draft}
-            disabled={disabled}
-            onChange={(event) => { setDraft(event.target.value); setFailed(false) }}
-          />
-        </label>
-        <small>{snapshot.writable ? t('patHint') : t('readOnly')}</small>
-        {snapshot.error !== undefined ? <small role="status">{snapshot.error}</small> : null}
-        {failed ? <small role="alert">{t('saveFailed')}</small> : null}
-        <div style={{ paddingBottom: '12px', borderBottom: '1px solid rgba(127,127,127,0.28)' }}>
-          <button type="button" disabled={disabled || draft.trim().length === 0} onClick={() => { void save() }}>
-            {saving ? t('saving') : t('save')}
+        <span className="qoder-status" role="status">
+          {credential.loading
+            ? t('loading')
+            : credential.error
+              ? t('readFailed')
+              : credential.configured
+                ? t('configured')
+                : t('notConfigured')}
+        </span>
+      </header>
+      <section className="qoder-section">
+        <div className="qoder-section-heading">
+          <h3>{t('patLabel')}</h3>
+          {credential.configured && !editing ? (
+            <button
+              disabled={disabled}
+              type="button"
+              onClick={() => setEditing(true)}
+            >
+              {t('changePat')}
+            </button>
+          ) : null}
+        </div>
+        <p className="qoder-muted">{t('credentialHint')}</p>
+        {!credential.configured || editing ? (
+          <>
+            <div>
+              <label htmlFor={patId}>{t('patLabel')}</label>
+              <div className="qoder-inline">
+                <input
+                  id={patId}
+                  type="password"
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  value={draft}
+                  disabled={disabled}
+                  onChange={(event) => {
+                    setDraft(event.target.value)
+                    setFailed(false)
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={disabled || !draft.trim()}
+                  onClick={() => {
+                    void save()
+                  }}
+                >
+                  {saving ? t('saving') : t('save')}
+                </button>
+              </div>
+            </div>
+            <small>{credential.writable ? t('patHint') : t('readOnly')}</small>
+          </>
+        ) : null}
+        {credential.error ? (
+          <div className="qoder-inline">
+            <p className="qoder-warning" role="alert">
+              {t('readFailed')}
+            </p>
+            <button
+              type="button"
+              disabled={credential.loading}
+              onClick={() => {
+                void props.credential.refresh()
+              }}
+            >
+              {t('retry')}
+            </button>
+          </div>
+        ) : null}
+        {failed ? (
+          <p className="qoder-warning" role="alert">
+            {t('saveFailed')}
+          </p>
+        ) : null}
+      </section>
+      {props.capacitySettings && props.models ? (
+        <CapacitySection
+          face={props.capacitySettings}
+          catalog={props.models}
+          t={t}
+        />
+      ) : null}
+      {props.quota ? (
+        <section className="qoder-section">
+          <div className="qoder-section-heading">
+            <h3>{t('quota')}</h3>
+            <button
+              type="button"
+              disabled={quota?.status === 'loading'}
+              onClick={() => {
+                void props.quota?.refresh()
+              }}
+            >
+              {quota?.status === 'loading' ? t('loading') : t('refresh')}
+            </button>
+          </div>
+          {report ? (
+            <>
+              <div>
+                <small>
+                  {report.planTierName || t('unknown')} ·{' '}
+                  {report.organizationName || report.userType}
+                </small>
+              </div>
+              <div>
+                <div className="qoder-quota-number">
+                  {report.personal.available
+                    ? `${report.personal.used.toLocaleString()} / ${report.personal.total.toLocaleString()}`
+                    : t('unknown')}
+                </div>
+                <small>
+                  {t('used')} · {report.personal.unit}
+                </small>
+              </div>
+              <dl className="qoder-facts">
+                <dt>{t('period')}</dt>
+                <dd>
+                  {report.periodStart && report.periodEnd
+                    ? `${date(report.periodStart)} – ${date(report.periodEnd)}`
+                    : t('unknown')}
+                </dd>
+                <dt>{t('updated')}</dt>
+                <dd>
+                  {quota?.fetchedAt
+                    ? new Date(quota.fetchedAt).toLocaleString()
+                    : t('unknown')}
+                </dd>
+              </dl>
+            </>
+          ) : (
+            <p className="qoder-muted">{t('noQuota')}</p>
+          )}
+          {quota?.status === 'error' ? (
+            <p className="qoder-warning" role="alert">
+              {report ? t('stale') : t('readFailed')}
+            </p>
+          ) : null}
+          <button
+            className="qoder-subtle"
+            type="button"
+            onClick={props.openQuota}
+          >
+            {t('details')}
           </button>
-        </div>
-      </div>
-
-      {quota === undefined ? null : (
-        <section data-qoder-integrations="true" style={{ display: 'grid', gap: '6px', paddingBottom: '12px' }}>
-          <strong>{t('integrations')}</strong>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        </section>
+      ) : null}
+      {props.quotaSettings ? (
+        <section className="qoder-section" data-qoder-integrations="true">
+          <h3>{t('integrations')}</h3>
+          <label className="qoder-toggle">
             <input
               type="checkbox"
               data-qoder-quota-toggle="true"
-              checked={quotaEnabled}
-              disabled={quotaReadOnly || quotaBusy}
-              onChange={(event) => { void toggleQuota(event.target.checked) }}
+              checked={settings?.enabled === true}
+              disabled={
+                !settings ||
+                settings.loading ||
+                !settings.writable ||
+                settings.failed ||
+                toggleBusy
+              }
+              onChange={(event) => {
+                setToggleBusy(true)
+                void props.quotaSettings
+                  ?.set(event.target.checked)
+                  .finally(() => setToggleBusy(false))
+              }}
             />
             <span>{t('quotaToggle')}</span>
           </label>
-          <small style={{ opacity: 0.75 }}>{t('quotaToggleHint')}</small>
-          {quotaSnapshot?.failed === true ? <small role="alert">{t('quotaToggleFailed')}</small> : null}
+          <small>{t('quotaToggleHint')}</small>
+          {settings?.failed ? (
+            <div className="qoder-inline">
+              <p role="alert" className="qoder-warning">
+                {t('quotaToggleFailed')}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  void props.quotaSettings?.refresh()
+                }}
+              >
+                {t('retry')}
+              </button>
+            </div>
+          ) : null}
         </section>
-      )}
+      ) : null}
     </div>
   )
 }

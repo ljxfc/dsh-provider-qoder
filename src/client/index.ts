@@ -16,19 +16,49 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { QUOTA_REMOTE_CONTRIBUTION } from '../usage-wire.ts'
 import { injectQuotaStyles } from '../quota-styles.ts'
-import { QoderProviderCard, type QoderCredentialFace, type QoderCredentialSnapshot } from './card.tsx'
+import {
+  QoderProviderCard,
+  type QoderCredentialFace,
+  type QoderCredentialSnapshot,
+} from './card.tsx'
 import { PANEL_LOCALE_NS, PANEL_TEXT_EN, PANEL_TEXT_ZH } from './copy.ts'
-import { QoderQuotaFooterEntry, QoderQuotaPanel, QUOTA_PANEL_ID, type QoderQuotaInjected } from './panel.tsx'
-import { createQuotaController, startQuotaAutoRefresh, type QoderQuotaNamespace } from './quota.ts'
-import { createQuotaSettingsFace, SETTINGS_NS, type SettingsWriteRemote } from './settings.ts'
+import {
+  QoderQuotaFooterEntry,
+  QoderQuotaPanel,
+  QUOTA_PANEL_ID,
+  type QoderQuotaInjected,
+} from './panel.tsx'
+import {
+  createQuotaController,
+  startQuotaAutoRefresh,
+  type QoderQuotaNamespace,
+} from './quota.ts'
+import {
+  createSettingsFaces,
+  SETTINGS_NS,
+  type SettingsWriteRemote,
+} from './settings.ts'
+import {
+  createModelsFace,
+  CAPACITY_EN,
+  CAPACITY_ZH,
+  type ModelsRemote,
+} from './capacity.tsx'
+import { injectProviderStyles } from './provider-styles.ts'
 
 const PROVIDER = 'qoder-cn'
 const DEFAULT_REF = 'QODERCN_PERSONAL_ACCESS_TOKEN'
 
-type RemoteResult<T> = { ok: true; value: T } | { ok: false; error?: { message?: string } }
+type RemoteResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error?: { message?: string } }
 
 interface CredentialsRemote {
-  describe(refs: string[]): Promise<RemoteResult<Record<string, { configured?: boolean; writable?: boolean }>>>
+  describe(
+    refs: string[],
+  ): Promise<
+    RemoteResult<Record<string, { configured?: boolean; writable?: boolean }>>
+  >
   set(ref: string, value: string): Promise<RemoteResult<void>>
 }
 
@@ -40,29 +70,37 @@ interface LayoutSelectionSeam {
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : undefined
 }
 
 function stringAt(value: unknown, key: string): string | undefined {
   const record = recordOf(value)
   const candidate = record?.[key]
-  return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate.trim() : undefined
+  return typeof candidate === 'string' && candidate.trim().length > 0
+    ? candidate.trim()
+    : undefined
 }
 
-async function apiKeyRef(settings: SettingsWriteRemote | undefined): Promise<string> {
-  if (settings === undefined) return DEFAULT_REF
+async function apiKeyRef(
+  settings: SettingsWriteRemote | undefined,
+): Promise<string> {
+  if (settings === undefined) throw new Error('Settings service unavailable')
   try {
     const response = await settings.describe()
-    if (!response.ok) return DEFAULT_REF
-    const namespace = response.value.namespaces?.find((entry) => entry.ns === SETTINGS_NS)
+    if (!response.ok) throw new Error('Settings read failed')
+    const namespace = response.value.namespaces?.find(
+      (entry) => entry.ns === SETTINGS_NS,
+    )
     const root = namespace?.value
     const providers = recordOf(recordOf(root)?.providers)
-    return stringAt(providers?.[PROVIDER], 'apiKeyEnv')
-      ?? stringAt(root, 'apiKeyEnv')
-      ?? DEFAULT_REF
+    return (
+      stringAt(providers?.[PROVIDER], 'apiKeyEnv') ??
+      stringAt(root, 'apiKeyEnv') ??
+      DEFAULT_REF
+    )
   } catch {
-    return DEFAULT_REF
+    throw new Error('Settings read failed')
   }
 }
 
@@ -76,12 +114,19 @@ function createCredentialFace(
     writable: true,
     loading: true,
   }
+  let generation = 0
   const listeners = new Set<() => void>()
-  const publish = (): void => { for (const listener of listeners) listener() }
+  const publish = (): void => {
+    for (const listener of listeners) listener()
+  }
   const refresh = async (): Promise<void> => {
-    const ref = await apiKeyRef(settings())
+    const ticket = ++generation
+    snapshot = { ...snapshot, loading: true }
+    publish()
     try {
+      const ref = await apiKeyRef(settings())
       const response = await credentials.describe([ref])
+      if (ticket !== generation) return
       if (response.ok) {
         const state = response.value[ref]
         snapshot = {
@@ -94,16 +139,17 @@ function createCredentialFace(
         snapshot = {
           ref,
           configured: false,
-          writable: true,
+          writable: false,
           loading: false,
           error: response.error?.message ?? 'credential status unavailable',
         }
       }
     } catch (error) {
+      if (ticket !== generation) return
       snapshot = {
-        ref,
+        ref: snapshot.ref,
         configured: false,
-        writable: true,
+        writable: false,
         loading: false,
         error: error instanceof Error ? error.message : String(error),
       }
@@ -113,12 +159,16 @@ function createCredentialFace(
   void refresh()
   return {
     getSnapshot: () => snapshot,
-    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
     refresh,
     set: async (value) => {
-      const ref = await apiKeyRef(settings())
+      if (snapshot.loading || !snapshot.writable || snapshot.error) return false
       let response: RemoteResult<void>
       try {
+        const ref = await apiKeyRef(settings())
         response = await credentials.set(ref, value)
       } catch {
         await refresh()
@@ -133,29 +183,48 @@ function createCredentialFace(
 /** Read `layout` at click time; it is not a dependency of this bundle. */
 function selectPanel(ctx: Context, id: string | null): void {
   const get = (ctx as unknown as { get?: (name: string) => unknown }).get
-  const layout = typeof get === 'function'
-    ? get.call(ctx, 'layout') as LayoutSelectionSeam | undefined
-    : undefined
+  const layout =
+    typeof get === 'function'
+      ? (get.call(ctx, 'layout') as LayoutSelectionSeam | undefined)
+      : undefined
   layout?.selectPanel(id)
 }
 
 const locale = {
   zh: {
-    title: 'Qoder CN', configured: 'PAT 已配置', notConfigured: '尚未配置 PAT', patLabel: 'Qoder PAT',
-    patHint: '粘贴 pt-... Personal Access Token。密钥会写入 DSH 凭据服务。', save: '保存', saving: '保存中…',
-    loading: '读取中…', readOnly: '当前 profile 的凭据不可写。', saveFailed: 'PAT 写入失败，请重试。',
+    ...CAPACITY_ZH,
+    title: 'Qoder CN',
+    configured: 'PAT 已配置',
+    notConfigured: '尚未配置 PAT',
+    patLabel: 'Qoder PAT',
+    patHint: '粘贴 pt-... Personal Access Token。密钥会写入 DSH 凭据服务。',
+    save: '保存',
+    saving: '保存中…',
+    loading: '读取中…',
+    readOnly: '当前 profile 的凭据不可写。',
+    saveFailed: 'PAT 写入失败，请重试。',
     integrations: '集成与显示',
     quotaToggle: '在侧边栏显示额度卡片',
     quotaToggleHint: '默认关闭；关闭时左侧栏不渲染卡片，也不会后台刷新额度。',
     quotaToggleFailed: '开关写入失败，请重试。',
   },
   en: {
-    title: 'Qoder CN', configured: 'PAT configured', notConfigured: 'PAT not configured', patLabel: 'Qoder PAT',
-    patHint: 'Paste a pt-... Personal Access Token. It is stored in the DSH credentials service.', save: 'Save', saving: 'Saving…',
-    loading: 'Loading…', readOnly: 'Credentials are read-only in this profile.', saveFailed: 'The PAT could not be stored. Try again.',
+    ...CAPACITY_EN,
+    title: 'Qoder CN',
+    configured: 'PAT configured',
+    notConfigured: 'PAT not configured',
+    patLabel: 'Qoder PAT',
+    patHint:
+      'Paste a pt-... Personal Access Token. It is stored in the DSH credentials service.',
+    save: 'Save',
+    saving: 'Saving…',
+    loading: 'Loading…',
+    readOnly: 'Credentials are read-only in this profile.',
+    saveFailed: 'The PAT could not be stored. Try again.',
     integrations: 'Integrations & display',
     quotaToggle: 'Show the quota card in the sidebar',
-    quotaToggleHint: 'Off by default; while off the sidebar renders no card and no background quota refresh runs.',
+    quotaToggleHint:
+      'Off by default; while off the sidebar renders no card and no background quota refresh runs.',
     quotaToggleFailed: 'The toggle could not be stored. Try again.',
   },
 }
@@ -165,48 +234,96 @@ export function apply(ctx: Context): void {
   // The panel's copy is a namespace of its own, but it follows the same active
   // language: declaring `PANEL_LOCALE_NS` on both registrations below is what
   // binds their `t` seat.
-  ctx.effect(() => ctx.locale.register(PANEL_LOCALE_NS, { zh: PANEL_TEXT_ZH, en: PANEL_TEXT_EN }))
+  ctx.effect(() =>
+    ctx.locale.register(PANEL_LOCALE_NS, {
+      zh: PANEL_TEXT_ZH,
+      en: PANEL_TEXT_EN,
+    }),
+  )
 
   // The two quota surfaces are styled by one global sheet, installed on the
   // first `apply` and released with this fiber so a disable or a reload leaves
   // no orphan <style> behind. Injection is idempotent by sheet id, which is what
   // makes the second and later applies no-ops instead of duplicate rules.
   ctx.effect(() => injectQuotaStyles(), 'dsh-provider-qoder: quota styles')
+  ctx.effect(
+    () => injectProviderStyles(),
+    'dsh-provider-qoder: provider styles',
+  )
 
   let settings: SettingsWriteRemote | undefined
-  const quotaSettings = createQuotaSettingsFace(() => settings)
+  const { quota: quotaSettings, capacity: capacitySettings } =
+    createSettingsFaces(() => settings)
+  let credentialFace: QoderCredentialFace | undefined
 
   let quotaNamespace: QoderQuotaNamespace | undefined
   const quota = createQuotaController(() => quotaNamespace)
+  const models = createModelsFace(
+    () => quotaNamespace as (QoderQuotaNamespace & ModelsRemote) | undefined,
+  )
 
   // The browser never holds the PAT, so quota facts cross the Typert Gateway.
   void ctx.remote.$mount(QUOTA_REMOTE_CONTRIBUTION).then(
-    (dispose) => { ctx.effect(() => () => { void dispose() }, 'dsh-provider-qoder: quota remote') },
-    (error: unknown) => { console.error('[dsh-provider-qoder] could not mount the quota remote:', error) },
+    (dispose) => {
+      ctx.effect(
+        () => () => {
+          void dispose()
+        },
+        'dsh-provider-qoder: quota remote',
+      )
+    },
+    (error: unknown) => {
+      console.error(
+        '[dsh-provider-qoder] could not mount the quota remote:',
+        error,
+      )
+    },
   )
   ctx.inject(['remote.qoder'], (quotaCtx) => {
-    quotaNamespace = (quotaCtx.remote as unknown as { qoder: QoderQuotaNamespace }).qoder
+    quotaNamespace = (
+      quotaCtx.remote as unknown as { qoder: QoderQuotaNamespace }
+    ).qoder
     void quota.refresh()
-    quotaCtx.effect(() => () => { quotaNamespace = undefined })
+    void models.refresh()
+    quotaCtx.effect(() => () => {
+      quotaNamespace = undefined
+    })
   })
 
   const panelFace = (): QoderQuotaInjected => ({
     hooks: { quota, quotaSettings },
-    refresh: () => { void quota.refresh() },
+    refresh: () => {
+      void quota.refresh()
+    },
     // `visible` is the only gate on the background poll: while the toggle is
     // off nothing is rendered AND nothing is refreshed.
-    startAutoRefresh: () => startQuotaAutoRefresh(quota, () => quotaSettings.getSnapshot().enabled),
-    open: () => { selectPanel(ctx, QUOTA_PANEL_ID) },
-    close: () => { selectPanel(ctx, null) },
+    startAutoRefresh: () =>
+      startQuotaAutoRefresh(quota, () => quotaSettings.getSnapshot().enabled),
+    open: () => {
+      selectPanel(ctx, QUOTA_PANEL_ID)
+    },
+    close: () => {
+      selectPanel(ctx, null)
+    },
   })
 
   try {
-    ctx.slots.inject('main', () => ctx.slots.register(
-      { name: 'main', key: QUOTA_PANEL_ID, locale: PANEL_LOCALE_NS, inject: panelFace },
-      QoderQuotaPanel,
-    ))
+    ctx.slots.inject('main', () =>
+      ctx.slots.register(
+        {
+          name: 'main',
+          key: QUOTA_PANEL_ID,
+          locale: PANEL_LOCALE_NS,
+          inject: panelFace,
+        },
+        QoderQuotaPanel,
+      ),
+    )
   } catch (error: unknown) {
-    console.error('[dsh-provider-qoder] could not register the quota panel:', error)
+    console.error(
+      '[dsh-provider-qoder] could not register the quota panel:',
+      error,
+    )
   }
 
   ctx.inject(['layout'], (layoutCtx) => {
@@ -214,30 +331,65 @@ export function apply(ctx: Context): void {
       // `order` is the only positional control inside a list slot and the
       // renderer sorts ascending, so 1 lands after the shipped footer chip and
       // immediately above the Settings seat.
-      layoutCtx.slots.inject('sidebar.footer.action', () => layoutCtx.slots.register(
-        { name: 'sidebar.footer.action', id: QUOTA_PANEL_ID, order: 1, locale: PANEL_LOCALE_NS, inject: panelFace },
-        QoderQuotaFooterEntry,
-      ))
+      layoutCtx.slots.inject('sidebar.footer.action', () =>
+        layoutCtx.slots.register(
+          {
+            name: 'sidebar.footer.action',
+            id: QUOTA_PANEL_ID,
+            order: 1,
+            locale: PANEL_LOCALE_NS,
+            inject: panelFace,
+          },
+          QoderQuotaFooterEntry,
+        ),
+      )
     } catch (error: unknown) {
-      console.error('[dsh-provider-qoder] could not register the sidebar quota card:', error)
+      console.error(
+        '[dsh-provider-qoder] could not register the sidebar quota card:',
+        error,
+      )
     }
   })
 
   ctx.inject(['remote.settings'], (settingsCtx) => {
-    settings = (settingsCtx.remote as unknown as { settings: SettingsWriteRemote }).settings
-    void quotaSettings.refresh()
-    settingsCtx.effect(() => () => { settings = undefined })
+    settings = (
+      settingsCtx.remote as unknown as { settings: SettingsWriteRemote }
+    ).settings
+    void capacitySettings.refresh()
+    void credentialFace?.refresh()
+    settingsCtx.effect(() => () => {
+      settings = undefined
+      void capacitySettings.refresh()
+      void credentialFace?.refresh()
+    })
   })
 
   ctx.inject(['remote.credentials'], (credentialsCtx) => {
-    const credentials = (credentialsCtx.remote as unknown as { credentials: CredentialsRemote }).credentials
+    const credentials = (
+      credentialsCtx.remote as unknown as { credentials: CredentialsRemote }
+    ).credentials
     const face = createCredentialFace(credentials, () => settings)
-    ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
-      name: 'settings.models.provider-card',
-      key: SETTINGS_NS,
-      locale: 'settings.qoder',
-      inject: () => ({ credential: face, quotaSettings }),
-    }, QoderProviderCard))
+    credentialFace = face
+    ctx.slots.inject('settings.models.provider-card', () =>
+      ctx.slots.register(
+        {
+          name: 'settings.models.provider-card',
+          key: SETTINGS_NS,
+          locale: 'settings.qoder',
+          inject: () => ({
+            credential: face,
+            quotaSettings,
+            capacitySettings,
+            models,
+            quota,
+            openQuota: () => {
+              selectPanel(ctx, QUOTA_PANEL_ID)
+            },
+          }),
+        },
+        QoderProviderCard,
+      ),
+    )
   })
 }
 

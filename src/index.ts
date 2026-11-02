@@ -31,6 +31,10 @@ import type { QoderCatalogModel, QoderConnectionOptions } from './adapter.ts'
 import { getMachineId, isQoderPatValue, parseVpcInstanceFromEnvironment, qoderCnEndpoints } from './cosy.ts'
 import { applyUsageRemote } from './usage-remote.ts'
 import type { QoderLang } from './annotate.ts'
+import { mergeModelLimits, validateCapacitySettings, type CapacitySettings, type ModelLimit } from './capacity.ts'
+export { assertCapacity, validateCapacitySettings, resolveCapacity, selectedGatewayContext, mergeModelLimits } from './capacity.ts'
+export { MODELS_DESCRIPTOR, MODELS_ENDPOINT, parseModelCapacities } from './usage-wire.ts'
+export type { ModelCapacityWire } from './usage-wire.ts'
 
 export {
   DEFAULT_CONTEXT_WINDOW,
@@ -117,7 +121,7 @@ const DISPLAY_NAME = 'Qoder CN'
  * parent `providers` dictionary is the volatile settings boundary in the
  * dsh-v0.1.7 contract.
  */
-export interface QoderProviderProfile {
+export interface QoderProviderProfile extends CapacitySettings {
   /** Credential reference resolved per request; defaults to `QODERCN_PERSONAL_ACCESS_TOKEN`. */
   apiKeyEnv?: string
   /** Enterprise VPC tenant instance (`<instance>.vpc.qoder.com.cn`); absent selects the public cloud. */
@@ -144,6 +148,9 @@ export interface QoderProviderProfile {
  * remount. The plain values are read through {@link plainConfig} below.
  */
 export interface Config {
+  contextWindowOverride: Volatile<number | undefined>
+  maxOutputTokens: Volatile<number | undefined>
+  modelLimits: Volatile<Record<string, ModelLimit> | undefined>
   apiKeyEnv: Volatile<string>
   vpcInstance: Volatile<string | undefined>
   baseURL: Volatile<string | undefined>
@@ -190,11 +197,18 @@ const catalogModel: z<QoderCatalogModel> = z.object({
   description: z.string(),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
+  contextWindows: z.array(z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)).default(undefined as never),
   inputModalities: z.array(z.union(['text', 'image'])),
   reasoning: z.boolean(),
 })
 
+const capacityFields = () => ({
+  contextWindowOverride: z.number().step(1).min(2).max(Number.MAX_SAFE_INTEGER),
+  maxOutputTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+  modelLimits: z.dict(z.object({ contextWindow: z.number().step(1).min(2).max(Number.MAX_SAFE_INTEGER), maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER) })).default(undefined as never),
+})
 const connectionFields = {
+  ...capacityFields(),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
   vpcInstance: z.string(),
   baseURL: z.string(),
@@ -213,6 +227,9 @@ const connectionFields = {
 
 /** Root fields are individually editable in the generic settings form. */
 const volatileConnectionFields = {
+  contextWindowOverride: capacityFields().contextWindowOverride.volatile(),
+  maxOutputTokens: capacityFields().maxOutputTokens.volatile(),
+  modelLimits: capacityFields().modelLimits.volatile(),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV).volatile(),
   vpcInstance: z.string().volatile(),
   baseURL: z.string().volatile(),
@@ -249,16 +266,19 @@ function resolveModels(
       throw new Error(`llm-qoder: catalog model "${model.id}" has an empty name`)
     }
     if (model.contextWindow !== undefined
-      && (!Number.isInteger(model.contextWindow) || model.contextWindow <= 0)) {
+      && (!Number.isSafeInteger(model.contextWindow) || model.contextWindow <= 0)) {
       throw new Error(
         `llm-qoder: catalog model "${model.id}" contextWindow must be a positive integer`,
       )
     }
     if (model.maxTokens !== undefined
-      && (!Number.isInteger(model.maxTokens) || model.maxTokens <= 0)) {
+      && (!Number.isSafeInteger(model.maxTokens) || model.maxTokens <= 0)) {
       throw new Error(
         `llm-qoder: catalog model "${model.id}" maxTokens must be a positive integer`,
       )
+    }
+    for (const value of model.contextWindows ?? []) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error('llm-qoder: catalog contextWindows must contain positive safe integers')
     }
     if (seen.has(model.id)) throw new Error(`llm-qoder: duplicate catalog model "${model.id}"`)
     seen.add(model.id)
@@ -277,6 +297,7 @@ function resolveModels(
       ...model.name === undefined ? {} : { name: model.name },
       ...model.description === undefined ? {} : { description: model.description },
       ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+      ...model.contextWindows === undefined ? {} : { contextWindows: [...model.contextWindows] },
       ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
       ...inputModalities === undefined ? {} : { inputModalities },
       ...model.reasoning === undefined ? {} : { reasoning: model.reasoning },
@@ -302,6 +323,9 @@ function readConfigValue<T>(value: T | Volatile<T> | undefined): T | undefined {
 /** Detach one immutable plain snapshot from the live Config references. */
 function plainConfig(config: Config | QoderConfigValues): QoderConfigValues {
   return {
+    contextWindowOverride: readConfigValue(config.contextWindowOverride),
+    maxOutputTokens: readConfigValue(config.maxOutputTokens),
+    modelLimits: readConfigValue(config.modelLimits),
     apiKeyEnv: readConfigValue(config.apiKeyEnv),
     vpcInstance: readConfigValue(config.vpcInstance),
     baseURL: readConfigValue(config.baseURL),
@@ -333,10 +357,10 @@ export function resolveAdapterOptions(
   let values = plainConfig(config)
   const profile = values.providers?.[PROVIDER]
   if (profile !== undefined) {
-    values = { ...values, ...profile }
+    values = { ...values, ...profile, modelLimits: mergeModelLimits(values.modelLimits, profile.modelLimits) }
   }
   if (values.defaultContextWindow !== undefined
-    && (!Number.isInteger(values.defaultContextWindow) || values.defaultContextWindow <= 0)) {
+    && (!Number.isSafeInteger(values.defaultContextWindow) || values.defaultContextWindow <= 0)) {
     throw new Error('llm-qoder: defaultContextWindow must be a positive integer')
   }
   if (values.maxTokens !== undefined
@@ -363,6 +387,7 @@ export function resolveAdapterOptions(
   }
 
   return {
+    ...validateCapacitySettings(values),
     endpoints: finalEndpoints,
     apiKeyEnv: credentialRef(values.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
     maxTokens: values.maxTokens ?? DEFAULT_MAX_TOKENS,

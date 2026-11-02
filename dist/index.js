@@ -55,6 +55,62 @@ import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 
 // src/adapter.ts
 import crypto2 from "node:crypto";
+
+// src/capacity.ts
+function assertCapacity(value, field) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`llm-qoder: ${field} must be a positive safe integer`);
+  }
+}
+function validateCapacitySettings(settings) {
+  for (const key of ["contextWindowOverride", "maxOutputTokens"]) {
+    if (settings[key] !== void 0) assertCapacity(settings[key], key);
+    if (key === "contextWindowOverride" && settings[key] === 1) throw new Error("llm-qoder: contextWindowOverride must leave room for input and output");
+  }
+  const modelLimits = /* @__PURE__ */ Object.create(null);
+  if (settings.modelLimits !== void 0 && (typeof settings.modelLimits !== "object" || settings.modelLimits === null || Array.isArray(settings.modelLimits))) throw new Error("llm-qoder: modelLimits must be an object");
+  for (const [id, limit] of Object.entries(settings.modelLimits ?? {})) {
+    if (!id.trim() || limit === null || typeof limit !== "object" || Array.isArray(limit)) throw new Error("llm-qoder: invalid modelLimits entry");
+    for (const key of ["contextWindow", "maxTokens"]) if (limit[key] !== void 0) assertCapacity(limit[key], `modelLimits.${id}.${key}`);
+    if (limit.contextWindow === 1) throw new Error(`llm-qoder: modelLimits.${id}.contextWindow must leave room for input and output`);
+    modelLimits[id] = { ...limit };
+  }
+  return { contextWindowOverride: settings.contextWindowOverride, maxOutputTokens: settings.maxOutputTokens, ...settings.modelLimits === void 0 ? {} : { modelLimits } };
+}
+function resolveCapacity(settings, model, known, requestMaxTokens) {
+  const limit = settings.modelLimits?.[model.id];
+  const contextWindow = limit?.contextWindow ?? settings.contextWindowOverride ?? model.contextWindow ?? known?.contextWindow ?? settings.defaultContextWindow;
+  const explicitOutput = limit?.maxTokens ?? settings.maxOutputTokens;
+  let maxTokens = requestMaxTokens ?? explicitOutput ?? model.maxTokens ?? settings.maxTokens;
+  assertCapacity(contextWindow, "contextWindow");
+  assertCapacity(maxTokens, "maxTokens");
+  if (contextWindow < 2) throw new Error("llm-qoder: contextWindow must leave room for input and output (at least 2 tokens)");
+  if (requestMaxTokens !== void 0 || explicitOutput !== void 0 || limit?.contextWindow !== void 0 || settings.contextWindowOverride !== void 0) {
+    maxTokens = Math.min(maxTokens, model.maxTokens ?? known?.maxTokens ?? Number.MAX_SAFE_INTEGER, contextWindow - 1);
+  }
+  return { contextWindow, maxTokens };
+}
+function selectedGatewayContext(settings, model) {
+  const selected = settings.modelLimits?.[model.id]?.contextWindow ?? settings.contextWindowOverride;
+  if (selected === void 0) return void 0;
+  assertCapacity(selected, "contextWindow");
+  return model.contextWindows?.includes(selected) ? selected : void 0;
+}
+function mergeModelLimits(root, profile) {
+  if (root === void 0 && profile === void 0) return void 0;
+  const lower = validateCapacitySettings({ modelLimits: root }).modelLimits ?? {};
+  const upper = validateCapacitySettings({ modelLimits: profile }).modelLimits ?? {};
+  return Object.fromEntries([.../* @__PURE__ */ new Set([...Object.keys(lower), ...Object.keys(upper)])].map((id) => {
+    const contextWindow = upper[id]?.contextWindow ?? lower[id]?.contextWindow;
+    const maxTokens = upper[id]?.maxTokens ?? lower[id]?.maxTokens;
+    return [id, {
+      ...contextWindow === void 0 ? {} : { contextWindow },
+      ...maxTokens === void 0 ? {} : { maxTokens }
+    }];
+  }));
+}
+
+// src/adapter.ts
 import { attributionHeaders, CONTEXT_WINDOW_EXCEEDED_CODE, isContextWindowExceededError, isQuotaExceededError, LlmAdapter, LlmError as LlmError4, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from "@deepseek-ai/dsh-llm";
 import { idleWatchdog, timeoutOf } from "@deepseek-ai/dsh-timeout";
 
@@ -1130,7 +1186,7 @@ function recordOf2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function positiveInteger(value) {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : void 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : void 0;
 }
 function positiveNumber2(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : void 0;
@@ -1165,6 +1221,13 @@ function parseQoderModelCatalog(value) {
     if (seen.has(identity.id)) continue;
     seen.add(identity.id);
     const contextWindow = contextWindowOf(entry);
+    const contextTiers = {};
+    for (const [id, raw] of Object.entries(recordOf2(entry.context_config) ?? {})) {
+      const count = positiveInteger(recordOf2(raw)?.token_count);
+      if (count !== void 0) Object.defineProperty(contextTiers, id, { value: count, enumerable: true });
+    }
+    const advertised = entry.available_context_windows ?? entry.availableContextWindows;
+    const contextWindows = [.../* @__PURE__ */ new Set([...Object.values(contextTiers), ...Array.isArray(advertised) ? advertised.flatMap((value3) => positiveInteger(value3) ?? []) : []])].sort((a, b) => a - b);
     const maxTokens = positiveInteger(entry.max_output_tokens);
     const promotion = parsePromotion(entry.promotion);
     const priceFactor = positiveNumber2(entry.price_factor);
@@ -1172,6 +1235,8 @@ function parseQoderModelCatalog(value) {
       id: identity.id,
       name: identity.name,
       ...contextWindow === void 0 ? {} : { contextWindow },
+      ...contextWindows.length === 0 ? {} : { contextWindows },
+      ...Object.keys(contextTiers).length === 0 ? {} : { contextTiers },
       ...maxTokens === void 0 ? {} : { maxTokens },
       inputModalities: entry.is_vl === true ? ["text", "image"] : ["text"],
       reasoning: entry.is_reasoning === true || recordOf2(entry.thinking_config) !== void 0,
@@ -1196,17 +1261,21 @@ function httpErrorCode(status, detail) {
   if (status >= 500) return "SERVER";
   return `HTTP_${status}`;
 }
-function modelInfo(provider, model, lang = DEFAULT_ANNOTATION_LANGUAGE, plans) {
+function modelInfo(provider, model, lang = DEFAULT_ANNOTATION_LANGUAGE, plans, connection) {
+  const selected = connection?.modelLimits?.[model.id]?.contextWindow ?? connection?.contextWindowOverride;
+  const supported = connection === void 0 ? void 0 : selectedGatewayContext(connection, model);
+  const displayModel = supported === void 0 ? model : { ...model, contextWindow: supported };
+  const localNote = selected !== void 0 && supported === void 0 ? `${lang === "zh" ? "\u672C\u5730\u9884\u7B97" : "Local budget"} ${formatContextWindow(selected)}` : void 0;
   const plan = plans?.[model.id];
-  const annotated = plan === void 0 || plan.length === 0 ? model : { ...model, plan };
-  const description = modelDescription(annotated, lang);
+  const annotated = plan === void 0 || plan.length === 0 ? displayModel : { ...displayModel, plan };
+  const description = [modelDescription(annotated, lang), localNote].filter(Boolean).join(" \xB7 ") || void 0;
   return {
     provider,
     id: model.id,
     // The 0.2.0 selector renders model names only, so the annotations ride the
     // name — that is the only channel the picker displays. `description` still
     // carries the same text for any surface that does render it.
-    name: modelSelectorLabel(annotated, lang),
+    name: [modelSelectorLabel(annotated, lang), localNote].filter(Boolean).join(" \xB7 "),
     ...description === void 0 ? {} : { description },
     ...model.inputModalities === void 0 ? {} : { inputModalities: model.inputModalities }
   };
@@ -1227,24 +1296,25 @@ var QoderAdapter = class extends LlmAdapter {
     const connection = this.config.options();
     const models = await this.catalogModels(connection, true);
     const lang = connection.annotationLanguage ?? DEFAULT_ANNOTATION_LANGUAGE;
-    return [...models].sort(compareModelsForSelector).map((model) => modelInfo(provider, model, lang, connection.annotationPlans));
+    return [...models].sort(compareModelsForSelector).map((model) => modelInfo(provider, model, lang, connection.annotationPlans, connection));
   }
   async resolveModel(provider, model, signal) {
     const connection = this.config.options();
     const models = await this.catalogModels(connection, false, signal);
     const configured = models.find((entry) => entry.id === model);
     const known = DEFAULT_KNOWN_MODELS.find((entry) => entry.id === model);
-    const contextWindow = configured?.contextWindow ?? known?.contextWindow ?? connection.defaultContextWindow;
+    const capacity = resolveCapacity(connection, configured ?? { id: model }, known);
     const reasoning = configured?.reasoning === true;
     return {
       ...configured === void 0 ? { provider, id: model, name: model, inputModalities: ["text"] } : modelInfo(
         provider,
         configured,
         connection.annotationLanguage ?? DEFAULT_ANNOTATION_LANGUAGE,
-        connection.annotationPlans
+        connection.annotationPlans,
+        connection
       ),
-      context: { contextWindow },
-      defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
+      context: { contextWindow: capacity.contextWindow },
+      defaultMaxTokens: capacity.maxTokens,
       ...reasoning ? {
         reasoning: {
           efforts: REASONING_EFFORTS,
@@ -1252,6 +1322,23 @@ var QoderAdapter = class extends LlmAdapter {
         }
       } : {}
     };
+  }
+  /** Read-only model capabilities and current local budgets. */
+  async getModelCapacities(signal) {
+    const connection = this.config.options();
+    const models = await this.catalogModels(connection, false, signal);
+    return models.map((model) => {
+      const capacity = resolveCapacity(connection, model, DEFAULT_KNOWN_MODELS.find((entry) => entry.id === model.id));
+      return {
+        id: model.id,
+        name: model.name ?? model.id,
+        ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
+        ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
+        contextWindows: [...model.contextWindows ?? []],
+        effectiveContextWindow: capacity.contextWindow,
+        effectiveMaxTokens: capacity.maxTokens
+      };
+    });
   }
   async catalogModels(connection, refresh, signal) {
     if (connection.models !== void 0) return connection.models;
@@ -1429,6 +1516,12 @@ var QoderAdapter = class extends LlmAdapter {
     );
   }
   async *request(options, signal, connection, rawPat, onComment) {
+    const modelLimit = connection.modelLimits?.[options.model];
+    const legacyAutomatic = options.maxTokens === void 0 && connection.contextWindowOverride === void 0 && connection.maxOutputTokens === void 0 && modelLimit?.contextWindow === void 0 && modelLimit?.maxTokens === void 0;
+    const catalog = legacyAutomatic ? [] : await this.catalogModels(connection, false, signal);
+    const model = catalog.find((model2) => model2.id === options.model) ?? { id: options.model };
+    const maxTokens = legacyAutomatic ? connection.maxTokens : resolveCapacity(connection, model, DEFAULT_KNOWN_MODELS.find((model2) => model2.id === options.model), options.maxTokens).maxTokens;
+    const gatewayContext = legacyAutomatic ? void 0 : selectedGatewayContext(connection, model);
     const jobToken = await this.ensureJobToken(rawPat, connection.endpoints, signal);
     const identity = await this.ensureIdentity(rawPat, jobToken, connection.endpoints, signal);
     const machineId = connection.machineId;
@@ -1441,7 +1534,6 @@ var QoderAdapter = class extends LlmAdapter {
     const requestId = crypto2.randomUUID();
     const sessionID = crypto2.createHash("sha256").update(`qoder-session\0${identity.userID}\0${qoderModel}`).digest("hex").slice(0, 16);
     const recordID = stableChatRecordID(qoderModel, options);
-    const maxTokens = options.maxTokens ?? connection.maxTokens;
     const reasoningEnabled = options.reasoningEffort !== void 0 && options.reasoningEffort !== "off";
     const reqBody = {
       request_id: requestId,
@@ -1466,6 +1558,7 @@ var QoderAdapter = class extends LlmAdapter {
       tools: tools ?? [],
       parameters: {
         max_tokens: maxTokens,
+        ...gatewayContext === void 0 ? {} : { context_length: gatewayContext },
         ...reasoningEnabled ? { reasoning_effort: options.reasoningEffort } : {}
       },
       chat_context: {
@@ -1730,6 +1823,37 @@ var QUOTA_DESCRIPTOR = {
   parameters: [],
   result: { mode: "strict", typeSymbol: `${REMOTE_PACKAGE}#QuotaSnapshotWire`, create: () => quotaSchema }
 };
+var MODELS_ENDPOINT = "qoder/models";
+function parseModelCapacities(value) {
+  const fail = (field) => {
+    throw new TypeError(`qoder/models result: invalid ${field}`);
+  };
+  const integer = (value2, field) => typeof value2 === "number" && Number.isSafeInteger(value2) && value2 > 0 ? value2 : fail(field);
+  if (!Array.isArray(value)) return fail("result");
+  return value.map((entry, index) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return fail(String(index));
+    if (typeof entry.id !== "string" || !entry.id || typeof entry.name !== "string") return fail("id/name");
+    if (!Array.isArray(entry.contextWindows)) return fail("contextWindows");
+    return {
+      id: entry.id,
+      name: entry.name,
+      ...entry.contextWindow === void 0 ? {} : { contextWindow: integer(entry.contextWindow, "contextWindow") },
+      ...entry.maxTokens === void 0 ? {} : { maxTokens: integer(entry.maxTokens, "maxTokens") },
+      contextWindows: entry.contextWindows.map((value2) => integer(value2, "contextWindows")),
+      effectiveContextWindow: integer(entry.effectiveContextWindow, "effectiveContextWindow"),
+      effectiveMaxTokens: integer(entry.effectiveMaxTokens, "effectiveMaxTokens")
+    };
+  });
+}
+var MODELS_DESCRIPTOR = {
+  id: `${REMOTE_PACKAGE}#${MODELS_ENDPOINT}`,
+  service: REMOTE_SERVICE,
+  namespace: REMOTE_NAMESPACE,
+  method: "models",
+  invocation: { kind: "direct" },
+  parameters: [],
+  result: { mode: "strict", typeSymbol: `${REMOTE_PACKAGE}#ModelCapacityWire[]`, create: () => ({ parse: parseModelCapacities }) }
+};
 var QUOTA_HOST_CONTRIBUTION = {
   package: REMOTE_PACKAGE,
   face: "host",
@@ -1738,7 +1862,7 @@ var QUOTA_HOST_CONTRIBUTION = {
   // Remote has no generated reflection exports, so use the official empty-model
   // form rather than leaving registry inspection with `model: undefined`.
   model: { services: [], events: [], objects: [] },
-  invocations: [QUOTA_DESCRIPTOR]
+  invocations: [QUOTA_DESCRIPTOR, MODELS_DESCRIPTOR]
 };
 
 // src/usage-remote.ts
@@ -1769,6 +1893,10 @@ var QoderUsageService = class extends TypertRemoteService {
     this.deps = deps;
   }
   deps;
+  /** Read-only catalog capabilities and effective configured budgets. */
+  async models() {
+    return this.deps.adapter.getModelCapacities();
+  }
   /**
    * The account's plan, billing window, and credit pools. Throws when the PAT
    * cannot be resolved or Qoder is unreachable, which the Gateway folds into
@@ -1995,6 +2123,7 @@ function createQuotaController(resolve) {
     if (namespace === void 0) {
       if (ticket !== generation) return;
       snapshot = {
+        ...snapshot,
         status: "error",
         error: QUOTA_REMOTE_UNMOUNTED_ERROR,
         ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
@@ -2006,6 +2135,7 @@ function createQuotaController(resolve) {
       const response = await namespace.quota();
       if (ticket !== generation) return;
       snapshot = response.ok ? { status: "ready", report: response.value, fetchedAt: Date.now() } : {
+        ...snapshot,
         status: "error",
         error: response.error?.message ?? "the quota read failed",
         ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
@@ -2013,6 +2143,7 @@ function createQuotaController(resolve) {
     } catch (error) {
       if (ticket !== generation) return;
       snapshot = {
+        ...snapshot,
         status: "error",
         error: error instanceof Error ? error.message : String(error),
         ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
@@ -2083,10 +2214,17 @@ var catalogModel = z.object({
   description: z.string(),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
+  contextWindows: z.array(z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)).default(void 0),
   inputModalities: z.array(z.union(["text", "image"])),
   reasoning: z.boolean()
 });
+var capacityFields = () => ({
+  contextWindowOverride: z.number().step(1).min(2).max(Number.MAX_SAFE_INTEGER),
+  maxOutputTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+  modelLimits: z.dict(z.object({ contextWindow: z.number().step(1).min(2).max(Number.MAX_SAFE_INTEGER), maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER) })).default(void 0)
+});
 var connectionFields = {
+  ...capacityFields(),
   apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV),
   vpcInstance: z.string(),
   baseURL: z.string(),
@@ -2103,6 +2241,9 @@ var connectionFields = {
   annotationLanguage: z.union(["zh", "en"])
 };
 var volatileConnectionFields = {
+  contextWindowOverride: capacityFields().contextWindowOverride.volatile(),
+  maxOutputTokens: capacityFields().maxOutputTokens.volatile(),
+  modelLimits: capacityFields().modelLimits.volatile(),
   apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV).volatile(),
   vpcInstance: z.string().volatile(),
   baseURL: z.string().volatile(),
@@ -2131,15 +2272,18 @@ function resolveModels(models) {
     if (model.name !== void 0 && model.name.length === 0) {
       throw new Error(`llm-qoder: catalog model "${model.id}" has an empty name`);
     }
-    if (model.contextWindow !== void 0 && (!Number.isInteger(model.contextWindow) || model.contextWindow <= 0)) {
+    if (model.contextWindow !== void 0 && (!Number.isSafeInteger(model.contextWindow) || model.contextWindow <= 0)) {
       throw new Error(
         `llm-qoder: catalog model "${model.id}" contextWindow must be a positive integer`
       );
     }
-    if (model.maxTokens !== void 0 && (!Number.isInteger(model.maxTokens) || model.maxTokens <= 0)) {
+    if (model.maxTokens !== void 0 && (!Number.isSafeInteger(model.maxTokens) || model.maxTokens <= 0)) {
       throw new Error(
         `llm-qoder: catalog model "${model.id}" maxTokens must be a positive integer`
       );
+    }
+    for (const value of model.contextWindows ?? []) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error("llm-qoder: catalog contextWindows must contain positive safe integers");
     }
     if (seen.has(model.id)) throw new Error(`llm-qoder: duplicate catalog model "${model.id}"`);
     seen.add(model.id);
@@ -2149,6 +2293,7 @@ function resolveModels(models) {
       ...model.name === void 0 ? {} : { name: model.name },
       ...model.description === void 0 ? {} : { description: model.description },
       ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
+      ...model.contextWindows === void 0 ? {} : { contextWindows: [...model.contextWindows] },
       ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
       ...inputModalities === void 0 ? {} : { inputModalities },
       ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
@@ -2167,6 +2312,9 @@ function readConfigValue(value) {
 }
 function plainConfig(config) {
   return {
+    contextWindowOverride: readConfigValue(config.contextWindowOverride),
+    maxOutputTokens: readConfigValue(config.maxOutputTokens),
+    modelLimits: readConfigValue(config.modelLimits),
     apiKeyEnv: readConfigValue(config.apiKeyEnv),
     vpcInstance: readConfigValue(config.vpcInstance),
     baseURL: readConfigValue(config.baseURL),
@@ -2185,9 +2333,9 @@ function resolveAdapterOptions(config, environment) {
   let values = plainConfig(config);
   const profile = values.providers?.[PROVIDER];
   if (profile !== void 0) {
-    values = { ...values, ...profile };
+    values = { ...values, ...profile, modelLimits: mergeModelLimits(values.modelLimits, profile.modelLimits) };
   }
-  if (values.defaultContextWindow !== void 0 && (!Number.isInteger(values.defaultContextWindow) || values.defaultContextWindow <= 0)) {
+  if (values.defaultContextWindow !== void 0 && (!Number.isSafeInteger(values.defaultContextWindow) || values.defaultContextWindow <= 0)) {
     throw new Error("llm-qoder: defaultContextWindow must be a positive integer");
   }
   if (values.maxTokens !== void 0 && (!Number.isSafeInteger(values.maxTokens) || values.maxTokens <= 0)) {
@@ -2208,6 +2356,7 @@ function resolveAdapterOptions(config, environment) {
     manage: endpoints.manage
   };
   return {
+    ...validateCapacitySettings(values),
     endpoints: finalEndpoints,
     apiKeyEnv: credentialRef(values.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
     maxTokens: values.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -2310,6 +2459,8 @@ export {
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DONE,
+  MODELS_DESCRIPTOR,
+  MODELS_ENDPOINT,
   PUBLIC_GATEWAY_URL,
   QUOTA_AUTO_REFRESH_MS,
   QUOTA_CSS,
@@ -2320,6 +2471,7 @@ export {
   RING_CIRCUMFERENCE,
   RING_RADIUS,
   apply,
+  assertCapacity,
   buildQoderAuthHeaders,
   clampPercent,
   compareModelsForSelector,
@@ -2344,11 +2496,13 @@ export {
   localizedText,
   mapFinishReason,
   mapUsage,
+  mergeModelLimits,
   modelAnnotationParts,
   modelDescription,
   modelSelectorLabel,
   name,
   parseEnvelope,
+  parseModelCapacities,
   parsePromotion,
   parseQoderModelCatalog,
   parseQoderSse,
@@ -2359,11 +2513,14 @@ export {
   qoderEncodeBody,
   refreshJobToken,
   resolveAdapterOptions,
+  resolveCapacity,
   ringDashOffset,
+  selectedGatewayContext,
   serializeMessages,
   serializeRequest,
   startQuotaAutoRefresh,
   systemTextOf,
   translate,
-  usedRatio
+  usedRatio,
+  validateCapacitySettings
 };

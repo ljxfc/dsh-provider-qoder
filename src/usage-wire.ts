@@ -153,6 +153,42 @@ export const QUOTA_DESCRIPTOR: InvocationDescriptor = {
   result: { mode: 'strict', typeSymbol: `${REMOTE_PACKAGE}#QuotaSnapshotWire`, create: () => quotaSchema },
 }
 
+export const MODELS_ENDPOINT = 'qoder/models'
+export interface ModelCapacityWire {
+  id: string
+  name: string
+  contextWindow?: number
+  maxTokens?: number
+  contextWindows: number[]
+  effectiveContextWindow: number
+  effectiveMaxTokens: number
+}
+export function parseModelCapacities(value: unknown): ModelCapacityWire[] {
+  const fail = (field: string): never => { throw new TypeError(`qoder/models result: invalid ${field}`) }
+  const integer = (value: unknown, field: string): number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : fail(field)
+  if (!Array.isArray(value)) return fail('result')
+  return value.map((entry, index) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return fail(String(index))
+    if (typeof entry.id !== 'string' || !entry.id || typeof entry.name !== 'string') return fail('id/name')
+    if (!Array.isArray(entry.contextWindows)) return fail('contextWindows')
+    return { id: entry.id, name: entry.name,
+      ...(entry.contextWindow === undefined ? {} : { contextWindow: integer(entry.contextWindow, 'contextWindow') }),
+      ...(entry.maxTokens === undefined ? {} : { maxTokens: integer(entry.maxTokens, 'maxTokens') }),
+      contextWindows: entry.contextWindows.map((value: unknown) => integer(value, 'contextWindows')),
+      effectiveContextWindow: integer(entry.effectiveContextWindow, 'effectiveContextWindow'),
+      effectiveMaxTokens: integer(entry.effectiveMaxTokens, 'effectiveMaxTokens') }
+  })
+}
+export const MODELS_DESCRIPTOR: InvocationDescriptor = {
+  id: `${REMOTE_PACKAGE}#${MODELS_ENDPOINT}`,
+  service: REMOTE_SERVICE,
+  namespace: REMOTE_NAMESPACE,
+  method: 'models',
+  invocation: { kind: 'direct' },
+  parameters: [],
+  result: { mode: 'strict', typeSymbol: `${REMOTE_PACKAGE}#ModelCapacityWire[]`, create: () => ({ parse: parseModelCapacities }) },
+}
+
 /** The Host-face contribution registered on `ctx.typert`. */
 export const QUOTA_HOST_CONTRIBUTION = {
   package: REMOTE_PACKAGE,
@@ -162,11 +198,11 @@ export const QUOTA_HOST_CONTRIBUTION = {
   // Remote has no generated reflection exports, so use the official empty-model
   // form rather than leaving registry inspection with `model: undefined`.
   model: { services: [], events: [], objects: [] },
-  invocations: [QUOTA_DESCRIPTOR],
+  invocations: [QUOTA_DESCRIPTOR, MODELS_DESCRIPTOR],
 }
 
 /** The Client-face contribution mounted on `ctx.remote`. */
 export const QUOTA_REMOTE_CONTRIBUTION: TypertRemoteContribution = {
   package: REMOTE_PACKAGE,
-  descriptors: [QUOTA_DESCRIPTOR],
+  descriptors: [QUOTA_DESCRIPTOR, MODELS_DESCRIPTOR],
 }

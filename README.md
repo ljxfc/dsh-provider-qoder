@@ -73,6 +73,30 @@ Both surfaces read the plan quota service (`/api/v2/user/plan`, `/api/v2/quota/u
 
 ## Models and transport
 
+### Context and output settings
+
+Open the Qoder card in **Models**. The redesigned card groups credentials, model capacity, quota, and sidebar preferences. Capacity controls offer automatic/inherited values, presets (including **500K** and **1M**), and custom integer token counts. Changes are saved immediately and read back from the Host; the next request uses them. Expand **Per-model overrides** to change one model without replacing its live catalog.
+
+Context presets use decimal units: 500K = 500,000; 1M = 1,000,000. Output presets show exact token counts (8,192 / 16,384 / 32,768 / 65,536 / 131,072). Output is bounded by the known model limit and available context budget; a request-specific output value can override the default within those bounds.
+
+**A selectable budget is not a guarantee of server support.** An explicitly selected context tier advertised by Qoder is sent as `parameters.context_length`. Other numbers change only DSH's local history budget, and the model details show a warning. For example, a catalog advertising 200K, 400K, and 1M does not advertise 500K. Increasing a local budget cannot extend a backend limit. The model details show the effective budget, its source, and the advertised tiers.
+
+Equivalent configuration (secrets remain in the credentials service):
+
+```yaml
+llm-qoder:
+  contextWindowOverride: 1000000
+  maxOutputTokens: 16384
+  modelLimits:
+    qwen3.8-flash:
+      contextWindow: 500000
+      maxTokens: 8192
+```
+
+These optional fields also work under `providers.qoder-cn`. Model fields inherit individually from the root configuration into the provider profile; editing one model preserves other models' inherited settings. **Restore automatic** removes the selected layer's new overrides and resumes inheritance. The legacy `defaultContextWindow` and `maxTokens` fallback settings retain their old meaning when no new override is set.
+
+Quota refresh failures keep the last successful report, labelled with its timestamp and a stale-data message. Read failures and read-only profiles disable settings writes; revision conflicts are reread and retried once. See the [validation record](docs/provider-settings-validation.zh-CN.md) for tested scope and reproduction commands.
+
 When `models` is omitted, the adapter signs and fetches Qoder's live catalog from `/algo/api/v2/model/list`. Known wire keys retain stable selector ids such as `gm51model` → `glm-5.2`; newly returned keys remain addressable under their wire id. A static `models` list is an optional complete override.
 
 Model discovery and chat requests use the provider's own connection. The `qodercn` CLI does not need to stay running.

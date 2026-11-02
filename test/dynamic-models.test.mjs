@@ -73,6 +73,8 @@ test('parses enabled live models and rejects unusable listings', () => {
       id: 'glm-5.3',
       name: 'GLM 5.3',
       contextWindow: 200_000,
+      contextWindows: [200_000, 1_000_000],
+      contextTiers: { '1M': 1_000_000, '200K': 200_000 },
       maxTokens: 32_768,
       inputModalities: ['text', 'image'],
       reasoning: true,

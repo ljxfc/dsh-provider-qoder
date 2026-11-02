@@ -45,6 +45,8 @@ export interface QoderPanelText {
   notConfigured: string
   /** Read failed; retry affordance. */
   error: string
+  /** Last successful values remain visible after a refresh failure. */
+  stale: string
   /** Heading of the current-cycle usage block. */
   usageBlock: string
   /** Personal plan pool label. */
@@ -105,6 +107,7 @@ export const PANEL_TEXT_ZH: QoderPanelText = {
   unavailable: '当前 profile 未挂载额度服务。',
   notConfigured: '尚未配置 PAT，无法读取额度。',
   error: '额度读取失败',
+  stale: '上次成功数据，当前刷新失败',
   usageBlock: '额度',
   personalPool: '个人套餐额度',
   noPersonalPool: '该账户没有个人套餐额度。',
@@ -143,6 +146,7 @@ export const PANEL_TEXT_EN: QoderPanelText = {
   unavailable: 'The quota service is not mounted in this profile.',
   notConfigured: 'No PAT is configured yet, so quota cannot be read.',
   error: 'Could not read the quota',
+  stale: 'Last successful data; refresh failed',
   usageBlock: 'Usage',
   personalPool: 'Personal plan credits',
   noPersonalPool: 'This account has no personal plan credits.',

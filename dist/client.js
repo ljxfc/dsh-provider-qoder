@@ -107,9 +107,40 @@ var QUOTA_DESCRIPTOR = {
   parameters: [],
   result: { mode: "strict", typeSymbol: `${REMOTE_PACKAGE}#QuotaSnapshotWire`, create: () => quotaSchema }
 };
+var MODELS_ENDPOINT = "qoder/models";
+function parseModelCapacities(value) {
+  const fail = (field) => {
+    throw new TypeError(`qoder/models result: invalid ${field}`);
+  };
+  const integer = (value2, field) => typeof value2 === "number" && Number.isSafeInteger(value2) && value2 > 0 ? value2 : fail(field);
+  if (!Array.isArray(value)) return fail("result");
+  return value.map((entry, index) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return fail(String(index));
+    if (typeof entry.id !== "string" || !entry.id || typeof entry.name !== "string") return fail("id/name");
+    if (!Array.isArray(entry.contextWindows)) return fail("contextWindows");
+    return {
+      id: entry.id,
+      name: entry.name,
+      ...entry.contextWindow === void 0 ? {} : { contextWindow: integer(entry.contextWindow, "contextWindow") },
+      ...entry.maxTokens === void 0 ? {} : { maxTokens: integer(entry.maxTokens, "maxTokens") },
+      contextWindows: entry.contextWindows.map((value2) => integer(value2, "contextWindows")),
+      effectiveContextWindow: integer(entry.effectiveContextWindow, "effectiveContextWindow"),
+      effectiveMaxTokens: integer(entry.effectiveMaxTokens, "effectiveMaxTokens")
+    };
+  });
+}
+var MODELS_DESCRIPTOR = {
+  id: `${REMOTE_PACKAGE}#${MODELS_ENDPOINT}`,
+  service: REMOTE_SERVICE,
+  namespace: REMOTE_NAMESPACE,
+  method: "models",
+  invocation: { kind: "direct" },
+  parameters: [],
+  result: { mode: "strict", typeSymbol: `${REMOTE_PACKAGE}#ModelCapacityWire[]`, create: () => ({ parse: parseModelCapacities }) }
+};
 var QUOTA_REMOTE_CONTRIBUTION = {
   package: REMOTE_PACKAGE,
-  descriptors: [QUOTA_DESCRIPTOR]
+  descriptors: [QUOTA_DESCRIPTOR, MODELS_DESCRIPTOR]
 };
 
 // src/quota-styles.ts
@@ -229,80 +260,591 @@ function injectQuotaStyles(id = QUOTA_CSS_ID, css = QUOTA_CSS) {
 }
 
 // src/client/card.tsx
+var React2 = __toESM(require("react"), 1);
+var import_react2 = require("react");
+
+// src/client/capacity.tsx
 var React = __toESM(require("react"), 1);
 var import_react = require("react");
-var SECTION_STYLE = { display: "grid", gap: "8px", padding: "12px 0" };
-function defaultText(key) {
-  return {
-    title: "Qoder CN",
-    configured: "PAT configured",
-    notConfigured: "PAT not configured",
-    patLabel: "Qoder PAT",
-    patHint: "Paste a pt-... Personal Access Token. It is stored in the DSH credentials service.",
-    save: "Save",
-    saving: "Saving\u2026",
-    loading: "Loading\u2026",
-    readOnly: "Credentials are read-only in this profile.",
-    saveFailed: "The PAT could not be stored. Try again.",
-    integrations: "Integrations & display",
-    quotaToggle: "Show the quota card in the sidebar",
-    quotaToggleHint: "Off by default; while off the sidebar renders no card and no background quota refresh runs.",
-    quotaToggleFailed: "The toggle could not be stored. Try again."
-  }[key] ?? key;
+
+// src/capacity.ts
+function assertCapacity(value, field) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`llm-qoder: ${field} must be a positive safe integer`);
+  }
 }
-function QoderProviderCard(props) {
-  const t = props.t ?? defaultText;
-  const quota = props.quotaSettings;
-  const [snapshot, setSnapshot] = (0, import_react.useState)(() => props.credential.getSnapshot());
-  const [quotaSnapshot, setQuotaSnapshot] = (0, import_react.useState)(
-    () => quota?.getSnapshot()
+function validateCapacitySettings(settings) {
+  for (const key of ["contextWindowOverride", "maxOutputTokens"]) {
+    if (settings[key] !== void 0) assertCapacity(settings[key], key);
+    if (key === "contextWindowOverride" && settings[key] === 1) throw new Error("llm-qoder: contextWindowOverride must leave room for input and output");
+  }
+  const modelLimits = /* @__PURE__ */ Object.create(null);
+  if (settings.modelLimits !== void 0 && (typeof settings.modelLimits !== "object" || settings.modelLimits === null || Array.isArray(settings.modelLimits))) throw new Error("llm-qoder: modelLimits must be an object");
+  for (const [id, limit] of Object.entries(settings.modelLimits ?? {})) {
+    if (!id.trim() || limit === null || typeof limit !== "object" || Array.isArray(limit)) throw new Error("llm-qoder: invalid modelLimits entry");
+    for (const key of ["contextWindow", "maxTokens"]) if (limit[key] !== void 0) assertCapacity(limit[key], `modelLimits.${id}.${key}`);
+    if (limit.contextWindow === 1) throw new Error(`llm-qoder: modelLimits.${id}.contextWindow must leave room for input and output`);
+    modelLimits[id] = { ...limit };
+  }
+  return { contextWindowOverride: settings.contextWindowOverride, maxOutputTokens: settings.maxOutputTokens, ...settings.modelLimits === void 0 ? {} : { modelLimits } };
+}
+function mergeModelLimits(root, profile) {
+  if (root === void 0 && profile === void 0) return void 0;
+  const lower = validateCapacitySettings({ modelLimits: root }).modelLimits ?? {};
+  const upper = validateCapacitySettings({ modelLimits: profile }).modelLimits ?? {};
+  return Object.fromEntries([.../* @__PURE__ */ new Set([...Object.keys(lower), ...Object.keys(upper)])].map((id) => {
+    const contextWindow = upper[id]?.contextWindow ?? lower[id]?.contextWindow;
+    const maxTokens = upper[id]?.maxTokens ?? lower[id]?.maxTokens;
+    return [id, {
+      ...contextWindow === void 0 ? {} : { contextWindow },
+      ...maxTokens === void 0 ? {} : { maxTokens }
+    }];
+  }));
+}
+
+// src/client/settings.ts
+var SETTINGS_NS = "llm-qoder";
+var SHOW_SIDEBAR_QUOTA_FIELD = "showSidebarQuota";
+function recordOf(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function validCapacity(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+function createSettingsFaces(resolve) {
+  let snapshot = {
+    enabled: false,
+    loading: true,
+    writable: false,
+    failed: false,
+    values: {},
+    ownValues: {},
+    layer: "root",
+    busy: false,
+    saved: false
+  };
+  let revision;
+  let document2 = {};
+  let generation = 0;
+  const listeners = /* @__PURE__ */ new Set();
+  const publish = () => {
+    for (const listener of listeners) listener();
+  };
+  const refresh = async () => {
+    const ticket = ++generation;
+    snapshot = { ...snapshot, loading: true };
+    publish();
+    try {
+      const remote = resolve();
+      if (!remote) throw new Error("Settings service unavailable");
+      const response = await remote.describe();
+      if (!response.ok)
+        throw new Error(response.error?.message ?? "Settings read failed");
+      if (ticket !== generation) return;
+      const row = response.value.namespaces?.find(
+        (entry) => entry.ns === SETTINGS_NS
+      );
+      revision = row?.revision;
+      const root = recordOf(row?.value) ?? {};
+      document2 = root;
+      const profile = recordOf(recordOf(root.providers)?.["qoder-cn"]);
+      const values = {
+        ...root,
+        ...profile,
+        modelLimits: mergeModelLimits(root.modelLimits, profile?.modelLimits)
+      };
+      snapshot = {
+        ...snapshot,
+        values,
+        ownValues: profile ?? root,
+        layer: profile ? "providers.qoder-cn" : "root",
+        enabled: root.showSidebarQuota === true,
+        loading: false,
+        writable: response.value.writable !== false,
+        failed: false,
+        error: void 0
+      };
+    } catch (error) {
+      if (ticket !== generation) return;
+      revision = void 0;
+      snapshot = {
+        ...snapshot,
+        loading: false,
+        writable: false,
+        failed: true,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+    publish();
+  };
+  const write = async (makeOps) => {
+    if (snapshot.loading || snapshot.busy || !snapshot.writable || snapshot.failed)
+      return false;
+    snapshot = { ...snapshot, busy: true, saved: false, error: void 0 };
+    publish();
+    try {
+      const remote = resolve();
+      if (!remote) throw new Error("Settings service unavailable");
+      let ops = makeOps();
+      let response = await remote.mutate(SETTINGS_NS, ops, revision);
+      if (!response.ok && /revision|conflict/i.test(
+        `${response.error?.code ?? ""} ${response.error?.message ?? ""}`
+      )) {
+        await refresh();
+        if (snapshot.failed || !snapshot.writable)
+          throw new Error(snapshot.error ?? "Settings reread failed");
+        ops = makeOps();
+        response = await remote.mutate(SETTINGS_NS, ops, revision);
+      }
+      if (!response.ok)
+        throw new Error(response.error?.message ?? "Settings write rejected");
+      await refresh();
+      if (snapshot.failed) return false;
+      for (const op of ops) {
+        const observed = op.path.reduce(
+          (value, key) => recordOf(value)?.[key],
+          document2
+        );
+        if (op.op === "set" ? observed !== op.value : observed !== void 0)
+          throw new Error("Host readback did not match the saved setting");
+      }
+      snapshot = { ...snapshot, saved: true };
+      return true;
+    } catch (error) {
+      snapshot = {
+        ...snapshot,
+        error: error instanceof Error ? error.message : String(error),
+        saved: false
+      };
+      return false;
+    } finally {
+      snapshot = { ...snapshot, busy: false };
+      publish();
+    }
+  };
+  const prefix = () => snapshot.layer === "root" ? [] : ["providers", "qoder-cn"];
+  const pathFor = (field, model) => [
+    ...prefix(),
+    ...model === void 0 ? [field] : [
+      "modelLimits",
+      model,
+      field === "contextWindowOverride" ? "contextWindow" : "maxTokens"
+    ]
+  ];
+  const subscribe = (listener) => {
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  };
+  const capacity = {
+    getSnapshot: () => snapshot,
+    subscribe,
+    refresh,
+    set: async (field, value, model) => {
+      if (value !== void 0 && (!validCapacity(value) || field === "contextWindowOverride" && value < 2)) {
+        snapshot = {
+          ...snapshot,
+          error: "Use a positive safe integer token count",
+          saved: false
+        };
+        publish();
+        return false;
+      }
+      const limits = model === void 0 ? void 0 : snapshot.values.modelLimits?.[model];
+      const context = field === "contextWindowOverride" ? value : limits?.contextWindow ?? snapshot.values.contextWindowOverride;
+      const output = field === "maxOutputTokens" ? value : limits?.maxTokens ?? snapshot.values.maxOutputTokens;
+      if (context !== void 0 && output !== void 0 && output >= context) {
+        snapshot = {
+          ...snapshot,
+          error: "Output must be smaller than the context window",
+          saved: false
+        };
+        publish();
+        return false;
+      }
+      return write(() => {
+        const current = model === void 0 ? void 0 : snapshot.values.modelLimits?.[model];
+        const nextContext = field === "contextWindowOverride" ? value : current?.contextWindow ?? snapshot.values.contextWindowOverride;
+        const nextOutput = field === "maxOutputTokens" ? value : current?.maxTokens ?? snapshot.values.maxOutputTokens;
+        if (nextContext !== void 0 && nextOutput !== void 0 && nextOutput >= nextContext)
+          throw new Error("Output must be smaller than the context window");
+        return [
+          value === void 0 ? { op: "unset", path: pathFor(field, model) } : { op: "set", path: pathFor(field, model), value }
+        ];
+      });
+    },
+    reset: (model) => write(() => [
+      { op: "unset", path: pathFor("contextWindowOverride", model) },
+      { op: "unset", path: pathFor("maxOutputTokens", model) }
+    ])
+  };
+  const quota = {
+    getSnapshot: () => snapshot,
+    subscribe,
+    refresh,
+    set: (value) => write(() => [{ op: "set", path: [SHOW_SIDEBAR_QUOTA_FIELD], value }])
+  };
+  void refresh();
+  return { capacity, quota };
+}
+function modelOverrideInfo(state, id, contextWindows) {
+  const own = (state.ownValues ?? state.values).modelLimits?.[id];
+  const effective = state.values.modelLimits?.[id];
+  const source = (field) => own?.[field] !== void 0 ? "modelSource" : effective?.[field] !== void 0 ? "inheritedModelSource" : state.values[field === "contextWindow" ? "contextWindowOverride" : "maxOutputTokens"] !== void 0 ? "providerSource" : "catalogSource";
+  const chosenContext = effective?.contextWindow ?? state.values.contextWindowOverride;
+  return {
+    chosenContext,
+    contextSource: source("contextWindow"),
+    outputSource: source("maxTokens"),
+    unsupported: chosenContext !== void 0 && !contextWindows.includes(chosenContext)
+  };
+}
+
+// src/client/capacity.tsx
+function createModelsFace(resolve) {
+  let snapshot = { loading: false, models: [] };
+  let generation = 0;
+  const listeners = /* @__PURE__ */ new Set();
+  const publish = () => {
+    for (const listener of listeners) listener();
+  };
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (fn) => {
+      listeners.add(fn);
+      return () => {
+        listeners.delete(fn);
+      };
+    },
+    refresh: async () => {
+      const ticket = ++generation;
+      snapshot = { ...snapshot, loading: true };
+      publish();
+      try {
+        const remote = resolve();
+        if (!remote) throw new Error("Model catalog unavailable");
+        const result = await remote.models();
+        if (!result.ok)
+          throw new Error(result.error?.message ?? "Model catalog read failed");
+        if (ticket === generation)
+          snapshot = { loading: false, models: result.value };
+      } catch (error) {
+        if (ticket === generation)
+          snapshot = {
+            ...snapshot,
+            loading: false,
+            error: error instanceof Error ? error.message : String(error)
+          };
+      }
+      if (ticket === generation) publish();
+    }
+  };
+}
+var CAPACITY_EN = {
+  capacity: "Model capacity",
+  defaults: "Provider defaults",
+  context: "Context window",
+  output: "Maximum output",
+  auto: "Automatic / inherit",
+  custom: "Custom",
+  reset: "Restore automatic",
+  saved: "Saved and read back from Host. Automatic inherits any parent override.",
+  capacityHint: "Context controls conversation history. Output limits one response. K = 1,000; M = 1,000,000.",
+  layer: "Settings layer",
+  models: "Per-model overrides",
+  effective: "Effective context / output",
+  server: "Catalog context / output",
+  tiers: "Available context tiers",
+  unsupported: "Local budget override: this value is not a declared server tier. Saving does not expand server capacity.",
+  supported: "Advertised tiers are negotiated with Qoder; other values change the local budget only.",
+  source: "Override source",
+  providerSource: "Provider default",
+  modelSource: "This model",
+  inheritedModelSource: "Inherited model override",
+  catalogSource: "Automatic / catalog",
+  unknown: "Unknown",
+  capacityReadOnly: "Settings are unavailable or read-only.",
+  retry: "Retry",
+  readFailed: "Read failed",
+  changePat: "Replace PAT",
+  credentialHint: "Configured indicates stored credentials; connection has not been verified.",
+  quota: "Quota overview",
+  refresh: "Refresh",
+  details: "View details",
+  used: "Used / total",
+  period: "Billing period",
+  updated: "Last successful update",
+  noQuota: "Refresh to load account quota.",
+  stale: "Last successful data; refresh failed."
+};
+var CAPACITY_ZH = {
+  capacity: "\u6A21\u578B\u4E0E\u5BB9\u91CF",
+  defaults: "\u63D0\u4F9B\u5546\u9ED8\u8BA4\u8BBE\u7F6E",
+  context: "\u4E0A\u4E0B\u6587\u7A97\u53E3",
+  output: "\u6700\u5927\u8F93\u51FA",
+  auto: "\u81EA\u52A8 / \u7EE7\u627F\u4E0A\u5C42",
+  custom: "\u81EA\u5B9A\u4E49",
+  reset: "\u6062\u590D\u81EA\u52A8",
+  saved: "\u5DF2\u4FDD\u5B58\uFF0C\u5E76\u4ECE Host \u91CD\u65B0\u8BFB\u53D6\u3002\u81EA\u52A8\u6A21\u5F0F\u4F1A\u7EE7\u627F\u4E0A\u5C42\u5DF2\u6709\u8986\u76D6\u3002",
+  capacityHint: "\u4E0A\u4E0B\u6587\u63A7\u5236\u5BF9\u8BDD\u5386\u53F2\u9884\u7B97\uFF0C\u8F93\u51FA\u9650\u5236\u5355\u6B21\u56DE\u7B54\u3002K = 1,000\uFF1BM = 1,000,000\u3002",
+  layer: "\u751F\u6548\u914D\u7F6E\u5C42",
+  models: "\u6309\u6A21\u578B\u8986\u76D6",
+  effective: "\u6709\u6548\u4E0A\u4E0B\u6587 / \u8F93\u51FA",
+  server: "\u76EE\u5F55\u4E0A\u4E0B\u6587 / \u8F93\u51FA",
+  tiers: "\u76EE\u5F55\u652F\u6301\u7684\u4E0A\u4E0B\u6587\u6863\u4F4D",
+  unsupported: "\u672C\u5730\u9884\u7B97\u8986\u76D6\uFF1A\u6B64\u503C\u4E0D\u662F\u76EE\u5F55\u58F0\u660E\u7684\u670D\u52A1\u7AEF\u6863\u4F4D\u3002\u4FDD\u5B58\u4E0D\u4F1A\u6269\u5927\u670D\u52A1\u7AEF\u5BB9\u91CF\u3002",
+  supported: "\u76EE\u5F55\u58F0\u660E\u7684\u6863\u4F4D\u4F1A\u4E0E Qoder \u534F\u5546\uFF1B\u5176\u4ED6\u6570\u503C\u4EC5\u4FEE\u6539\u672C\u5730\u9884\u7B97\u3002",
+  source: "\u8986\u76D6\u6765\u6E90",
+  providerSource: "\u63D0\u4F9B\u5546\u9ED8\u8BA4",
+  modelSource: "\u5F53\u524D\u6A21\u578B",
+  inheritedModelSource: "\u7EE7\u627F\u4E0A\u5C42\u6A21\u578B\u8986\u76D6",
+  catalogSource: "\u81EA\u52A8 / \u6A21\u578B\u76EE\u5F55",
+  unknown: "\u672A\u77E5",
+  capacityReadOnly: "\u8BBE\u7F6E\u6682\u4E0D\u53EF\u7528\u6216\u5F53\u524D\u914D\u7F6E\u53EA\u8BFB\u3002",
+  retry: "\u91CD\u8BD5",
+  readFailed: "\u8BFB\u53D6\u5931\u8D25",
+  changePat: "\u66F4\u6362 PAT",
+  credentialHint: "\u5DF2\u914D\u7F6E\u8868\u793A\u51ED\u636E\u5DF2\u5B58\u50A8\uFF0C\u4E0D\u4EE3\u8868\u8FDE\u63A5\u9A8C\u8BC1\u6210\u529F\u3002",
+  quota: "\u989D\u5EA6\u6982\u89C8",
+  refresh: "\u5237\u65B0",
+  details: "\u67E5\u770B\u8BE6\u60C5",
+  used: "\u5DF2\u7528 / \u603B\u989D",
+  period: "\u8D26\u671F",
+  updated: "\u4E0A\u6B21\u6210\u529F\u66F4\u65B0",
+  noQuota: "\u70B9\u51FB\u5237\u65B0\u8BFB\u53D6\u8D26\u6237\u989D\u5EA6\u3002",
+  stale: "\u5F53\u524D\u663E\u793A\u4E0A\u6B21\u6210\u529F\u6570\u636E\uFF1B\u672C\u6B21\u5237\u65B0\u5931\u8D25\u3002"
+};
+var CONTEXT = [128e3, 2e5, 256e3, 5e5, 1e6];
+var OUTPUT = [8192, 16384, 32768, 65536, 131072];
+function CapacityInput({
+  label,
+  value,
+  output,
+  disabled,
+  t,
+  onSave
+}) {
+  const presets = output ? OUTPUT : CONTEXT;
+  const [mode, setMode] = (0, import_react.useState)(
+    value === void 0 ? "auto" : presets.includes(value) ? String(value) : "custom"
   );
-  const [draft, setDraft] = (0, import_react.useState)("");
-  const [saving, setSaving] = (0, import_react.useState)(false);
-  const [failed, setFailed] = (0, import_react.useState)(false);
-  const [quotaBusy, setQuotaBusy] = (0, import_react.useState)(false);
-  const rootRef = (0, import_react.useRef)(null);
+  const [draft, setDraft] = (0, import_react.useState)(value === void 0 ? "" : String(value));
   (0, import_react.useEffect)(() => {
-    setSnapshot(props.credential.getSnapshot());
-    return props.credential.subscribe(() => setSnapshot(props.credential.getSnapshot()));
+    setMode(
+      value === void 0 ? "auto" : presets.includes(value) ? String(value) : "custom"
+    );
+    setDraft(value === void 0 ? "" : String(value));
+  }, [value]);
+  const valid = /^\d+$/.test(draft) && Number.isSafeInteger(Number(draft)) && Number(draft) > 0;
+  return /* @__PURE__ */ React.createElement("div", { className: "qoder-capacity-input" }, /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, label), /* @__PURE__ */ React.createElement(
+    "select",
+    {
+      "aria-label": label,
+      value: mode,
+      disabled,
+      onChange: (event) => {
+        const next = event.target.value;
+        setMode(next);
+        if (next !== "custom")
+          void onSave(next === "auto" ? void 0 : Number(next)).then(
+            (ok) => {
+              if (!ok)
+                setMode(
+                  value === void 0 ? "auto" : presets.includes(value) ? String(value) : "custom"
+                );
+            }
+          );
+      }
+    },
+    /* @__PURE__ */ React.createElement("option", { value: "auto" }, t("auto")),
+    presets.map((number) => /* @__PURE__ */ React.createElement("option", { key: number, value: number }, output ? number.toLocaleString("en-US") : number === 1e6 ? "1M \xB7 1,000,000" : `${number / 1e3}K \xB7 ${number.toLocaleString("en-US")}`)),
+    /* @__PURE__ */ React.createElement("option", { value: "custom" }, t("custom"))
+  )), mode === "custom" ? /* @__PURE__ */ React.createElement("div", { className: "qoder-inline" }, /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      "aria-label": `${label} \xB7 ${t("custom")}`,
+      inputMode: "numeric",
+      value: draft,
+      disabled,
+      onChange: (event) => setDraft(event.target.value)
+    }
+  ), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: disabled || !valid,
+      onClick: () => {
+        void onSave(Number(draft));
+      }
+    },
+    t("save")
+  )) : null, /* @__PURE__ */ React.createElement("small", null, value === void 0 ? t("auto") : `${value.toLocaleString("en-US")} tokens`));
+}
+function CapacitySection({
+  face,
+  catalog,
+  t
+}) {
+  const [state, setState] = (0, import_react.useState)(
+    () => face.getSnapshot()
+  );
+  const [models, setModels] = (0, import_react.useState)(() => catalog.getSnapshot());
+  (0, import_react.useEffect)(() => {
+    const dispose = face.subscribe(() => setState(face.getSnapshot()));
+    setState(face.getSnapshot());
+    return dispose;
+  }, [face]);
+  (0, import_react.useEffect)(() => {
+    const dispose = catalog.subscribe(() => setModels(catalog.getSnapshot()));
+    setModels(catalog.getSnapshot());
+    return dispose;
+  }, [catalog]);
+  const disabled = state.loading || state.busy || !state.writable || state.failed;
+  const editor = (model) => {
+    const own = state.ownValues ?? state.values;
+    const override = model ? own.modelLimits?.[model.id] : void 0;
+    const context = model ? override?.contextWindow : own.contextWindowOverride;
+    const output = model ? override?.maxTokens : own.maxOutputTokens;
+    const info = model ? modelOverrideInfo(state, model.id, model.contextWindows) : void 0;
+    return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "qoder-capacity-grid" }, /* @__PURE__ */ React.createElement(
+      CapacityInput,
+      {
+        label: t("context"),
+        value: context,
+        disabled,
+        t,
+        onSave: (value) => face.set("contextWindowOverride", value, model?.id).then(async (ok) => {
+          if (ok) await catalog.refresh();
+          return ok;
+        })
+      }
+    ), /* @__PURE__ */ React.createElement(
+      CapacityInput,
+      {
+        label: t("output"),
+        output: true,
+        value: output,
+        disabled,
+        t,
+        onSave: (value) => face.set("maxOutputTokens", value, model?.id).then(async (ok) => {
+          if (ok) await catalog.refresh();
+          return ok;
+        })
+      }
+    )), model ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("dl", { className: "qoder-facts" }, /* @__PURE__ */ React.createElement("dt", null, t("source")), /* @__PURE__ */ React.createElement("dd", null, t(info.contextSource), " / ", t(info.outputSource)), /* @__PURE__ */ React.createElement("dt", null, t("effective")), /* @__PURE__ */ React.createElement("dd", null, model.effectiveContextWindow.toLocaleString("en-US"), " /", " ", model.effectiveMaxTokens.toLocaleString("en-US")), /* @__PURE__ */ React.createElement("dt", null, t("server")), /* @__PURE__ */ React.createElement("dd", null, model.contextWindow?.toLocaleString("en-US") ?? t("unknown"), " /", " ", model.maxTokens?.toLocaleString("en-US") ?? t("unknown")), /* @__PURE__ */ React.createElement("dt", null, t("tiers")), /* @__PURE__ */ React.createElement("dd", null, model.contextWindows.map((value) => value.toLocaleString("en-US")).join(" \xB7 ") || t("unknown"))), info?.unsupported ? /* @__PURE__ */ React.createElement("p", { className: "qoder-warning", role: "status" }, t("unsupported")) : null) : null, /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        type: "button",
+        className: "qoder-subtle",
+        disabled,
+        onClick: () => {
+          void face.reset(model?.id).then((ok) => {
+            if (ok) void catalog.refresh();
+          });
+        }
+      },
+      t("reset")
+    ));
+  };
+  return /* @__PURE__ */ React.createElement("section", { className: "qoder-section" }, /* @__PURE__ */ React.createElement("div", { className: "qoder-section-heading" }, /* @__PURE__ */ React.createElement("h3", null, t("capacity")), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: state.loading || state.busy || models.loading,
+      onClick: () => {
+        void face.refresh();
+        void catalog.refresh();
+      }
+    },
+    t("refresh")
+  )), /* @__PURE__ */ React.createElement("p", { className: "qoder-muted" }, t("capacityHint")), /* @__PURE__ */ React.createElement("small", null, t("supported")), /* @__PURE__ */ React.createElement("div", { className: "qoder-layer" }, t("layer"), ": ", /* @__PURE__ */ React.createElement("code", null, state.layer)), /* @__PURE__ */ React.createElement("h4", null, t("defaults")), editor(), state.saved ? /* @__PURE__ */ React.createElement("p", { role: "status", className: "qoder-success" }, t("saved")) : null, state.error ? /* @__PURE__ */ React.createElement("p", { role: "alert", className: "qoder-warning" }, state.error) : null, !state.writable && !state.loading ? /* @__PURE__ */ React.createElement("p", { className: "qoder-muted" }, t("capacityReadOnly")) : null, /* @__PURE__ */ React.createElement("details", { className: "qoder-models" }, /* @__PURE__ */ React.createElement("summary", null, t("models"), " ", /* @__PURE__ */ React.createElement("span", null, models.models.length)), models.error ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, models.error) : null, models.loading ? /* @__PURE__ */ React.createElement("p", { role: "status" }, t("loading")) : null, models.models.map((model) => /* @__PURE__ */ React.createElement("details", { key: model.id, className: "qoder-model" }, /* @__PURE__ */ React.createElement("summary", null, model.name, /* @__PURE__ */ React.createElement("small", null, model.id)), editor(model)))));
+}
+
+// src/client/card.tsx
+var EN = {
+  ...CAPACITY_EN,
+  title: "Qoder CN",
+  configured: "PAT configured",
+  notConfigured: "PAT not configured",
+  patLabel: "Qoder PAT",
+  patHint: "Paste a pt-... Personal Access Token. Stored securely in DSH credentials.",
+  save: "Save",
+  saving: "Saving\u2026",
+  loading: "Loading\u2026",
+  readOnly: "Credentials are read-only.",
+  saveFailed: "The PAT could not be stored. Try again.",
+  integrations: "Integrations & display",
+  quotaToggle: "Show quota in the sidebar",
+  quotaToggleHint: "Off by default. No sidebar background refresh while off.",
+  quotaToggleFailed: "Settings could not be stored. Try again."
+};
+function QoderProviderCard(props) {
+  const patId = (0, import_react2.useId)();
+  const t = props.t ?? ((key) => EN[key] ?? key);
+  const [credential, setCredential] = (0, import_react2.useState)(
+    () => props.credential.getSnapshot()
+  );
+  const [settings, setSettings] = (0, import_react2.useState)(
+    () => props.quotaSettings?.getSnapshot()
+  );
+  const [quota, setQuota] = (0, import_react2.useState)(() => props.quota?.getSnapshot());
+  const [draft, setDraft] = (0, import_react2.useState)("");
+  const [editing, setEditing] = (0, import_react2.useState)(false);
+  const [saving, setSaving] = (0, import_react2.useState)(false);
+  const [failed, setFailed] = (0, import_react2.useState)(false);
+  const [toggleBusy, setToggleBusy] = (0, import_react2.useState)(false);
+  (0, import_react2.useEffect)(() => {
+    const dispose = props.credential.subscribe(
+      () => setCredential(props.credential.getSnapshot())
+    );
+    setCredential(props.credential.getSnapshot());
+    return dispose;
   }, [props.credential]);
-  (0, import_react.useEffect)(() => {
-    if (quota === void 0) return void 0;
-    setQuotaSnapshot(quota.getSnapshot());
-    return quota.subscribe(() => setQuotaSnapshot(quota.getSnapshot()));
-  }, [quota]);
-  const configured = snapshot.loading ? props.keyConfigured === true : snapshot.configured;
-  const disabled = saving || !snapshot.writable;
+  (0, import_react2.useEffect)(() => {
+    const dispose = props.quotaSettings?.subscribe(
+      () => setSettings(props.quotaSettings?.getSnapshot())
+    );
+    setSettings(props.quotaSettings?.getSnapshot());
+    return dispose;
+  }, [props.quotaSettings]);
+  (0, import_react2.useEffect)(() => {
+    const dispose = props.quota?.subscribe(
+      () => setQuota(props.quota?.getSnapshot())
+    );
+    setQuota(props.quota?.getSnapshot());
+    return dispose;
+  }, [props.quota]);
+  const disabled = saving || credential.loading || !credential.writable || !!credential.error;
   const save = async () => {
-    const value = draft.trim();
-    if (value.length === 0 || disabled) return;
+    if (disabled || !draft.trim()) return;
     setSaving(true);
     setFailed(false);
     try {
-      const ok = await props.credential.set(value);
-      if (ok) setDraft("");
-      else setFailed(true);
+      if (await props.credential.set(draft.trim())) {
+        setDraft("");
+        setEditing(false);
+      } else setFailed(true);
     } catch {
       setFailed(true);
     } finally {
       setSaving(false);
     }
   };
-  const quotaEnabled = quotaSnapshot?.enabled === true;
-  const quotaReadOnly = quotaSnapshot === void 0 || quotaSnapshot.loading || !quotaSnapshot.writable;
-  const toggleQuota = async (next) => {
-    if (quota === void 0 || quotaReadOnly || quotaBusy) return;
-    setQuotaBusy(true);
-    try {
-      await quota.set(next);
-    } catch {
-    } finally {
-      setQuotaBusy(false);
-    }
-  };
-  return /* @__PURE__ */ React.createElement("div", { ref: rootRef, "data-qoder-models-card": "true" }, /* @__PURE__ */ React.createElement("div", { style: SECTION_STYLE }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: "8px" } }, /* @__PURE__ */ React.createElement("strong", null, t("title")), /* @__PURE__ */ React.createElement("span", null, snapshot.loading ? t("loading") : configured ? t("configured") : t("notConfigured"))), /* @__PURE__ */ React.createElement("label", { style: { display: "grid", gap: "4px" } }, /* @__PURE__ */ React.createElement("span", null, t("patLabel")), /* @__PURE__ */ React.createElement(
+  const report = quota?.report;
+  const date = (value) => new Date(value < 1e11 ? value * 1e3 : value).toLocaleDateString();
+  return /* @__PURE__ */ React2.createElement("div", { "data-qoder-models-card": "true" }, /* @__PURE__ */ React2.createElement("header", { className: "qoder-header" }, /* @__PURE__ */ React2.createElement("div", { className: "qoder-brand" }, /* @__PURE__ */ React2.createElement("span", { className: "qoder-monogram", "aria-hidden": "true" }, "Q"), /* @__PURE__ */ React2.createElement("div", null, /* @__PURE__ */ React2.createElement("div", { className: "qoder-title" }, t("title")), /* @__PURE__ */ React2.createElement("small", null, "Qoder \xB7 China"))), /* @__PURE__ */ React2.createElement("span", { className: "qoder-status", role: "status" }, credential.loading ? t("loading") : credential.error ? t("readFailed") : credential.configured ? t("configured") : t("notConfigured"))), /* @__PURE__ */ React2.createElement("section", { className: "qoder-section" }, /* @__PURE__ */ React2.createElement("div", { className: "qoder-section-heading" }, /* @__PURE__ */ React2.createElement("h3", null, t("patLabel")), credential.configured && !editing ? /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      disabled,
+      type: "button",
+      onClick: () => setEditing(true)
+    },
+    t("changePat")
+  ) : null), /* @__PURE__ */ React2.createElement("p", { className: "qoder-muted" }, t("credentialHint")), !credential.configured || editing ? /* @__PURE__ */ React2.createElement(React2.Fragment, null, /* @__PURE__ */ React2.createElement("div", null, /* @__PURE__ */ React2.createElement("label", { htmlFor: patId }, t("patLabel")), /* @__PURE__ */ React2.createElement("div", { className: "qoder-inline" }, /* @__PURE__ */ React2.createElement(
     "input",
     {
+      id: patId,
       type: "password",
       autoComplete: "new-password",
       spellCheck: false,
@@ -313,20 +855,73 @@ function QoderProviderCard(props) {
         setFailed(false);
       }
     }
-  )), /* @__PURE__ */ React.createElement("small", null, snapshot.writable ? t("patHint") : t("readOnly")), snapshot.error !== void 0 ? /* @__PURE__ */ React.createElement("small", { role: "status" }, snapshot.error) : null, failed ? /* @__PURE__ */ React.createElement("small", { role: "alert" }, t("saveFailed")) : null, /* @__PURE__ */ React.createElement("div", { style: { paddingBottom: "12px", borderBottom: "1px solid rgba(127,127,127,0.28)" } }, /* @__PURE__ */ React.createElement("button", { type: "button", disabled: disabled || draft.trim().length === 0, onClick: () => {
-    void save();
-  } }, saving ? t("saving") : t("save")))), quota === void 0 ? null : /* @__PURE__ */ React.createElement("section", { "data-qoder-integrations": "true", style: { display: "grid", gap: "6px", paddingBottom: "12px" } }, /* @__PURE__ */ React.createElement("strong", null, t("integrations")), /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: "8px" } }, /* @__PURE__ */ React.createElement(
+  ), /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: disabled || !draft.trim(),
+      onClick: () => {
+        void save();
+      }
+    },
+    saving ? t("saving") : t("save")
+  ))), /* @__PURE__ */ React2.createElement("small", null, credential.writable ? t("patHint") : t("readOnly"))) : null, credential.error ? /* @__PURE__ */ React2.createElement("div", { className: "qoder-inline" }, /* @__PURE__ */ React2.createElement("p", { className: "qoder-warning", role: "alert" }, t("readFailed")), /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: credential.loading,
+      onClick: () => {
+        void props.credential.refresh();
+      }
+    },
+    t("retry")
+  )) : null, failed ? /* @__PURE__ */ React2.createElement("p", { className: "qoder-warning", role: "alert" }, t("saveFailed")) : null), props.capacitySettings && props.models ? /* @__PURE__ */ React2.createElement(
+    CapacitySection,
+    {
+      face: props.capacitySettings,
+      catalog: props.models,
+      t
+    }
+  ) : null, props.quota ? /* @__PURE__ */ React2.createElement("section", { className: "qoder-section" }, /* @__PURE__ */ React2.createElement("div", { className: "qoder-section-heading" }, /* @__PURE__ */ React2.createElement("h3", null, t("quota")), /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: quota?.status === "loading",
+      onClick: () => {
+        void props.quota?.refresh();
+      }
+    },
+    quota?.status === "loading" ? t("loading") : t("refresh")
+  )), report ? /* @__PURE__ */ React2.createElement(React2.Fragment, null, /* @__PURE__ */ React2.createElement("div", null, /* @__PURE__ */ React2.createElement("small", null, report.planTierName || t("unknown"), " \xB7", " ", report.organizationName || report.userType)), /* @__PURE__ */ React2.createElement("div", null, /* @__PURE__ */ React2.createElement("div", { className: "qoder-quota-number" }, report.personal.available ? `${report.personal.used.toLocaleString()} / ${report.personal.total.toLocaleString()}` : t("unknown")), /* @__PURE__ */ React2.createElement("small", null, t("used"), " \xB7 ", report.personal.unit)), /* @__PURE__ */ React2.createElement("dl", { className: "qoder-facts" }, /* @__PURE__ */ React2.createElement("dt", null, t("period")), /* @__PURE__ */ React2.createElement("dd", null, report.periodStart && report.periodEnd ? `${date(report.periodStart)} \u2013 ${date(report.periodEnd)}` : t("unknown")), /* @__PURE__ */ React2.createElement("dt", null, t("updated")), /* @__PURE__ */ React2.createElement("dd", null, quota?.fetchedAt ? new Date(quota.fetchedAt).toLocaleString() : t("unknown")))) : /* @__PURE__ */ React2.createElement("p", { className: "qoder-muted" }, t("noQuota")), quota?.status === "error" ? /* @__PURE__ */ React2.createElement("p", { className: "qoder-warning", role: "alert" }, report ? t("stale") : t("readFailed")) : null, /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      className: "qoder-subtle",
+      type: "button",
+      onClick: props.openQuota
+    },
+    t("details")
+  )) : null, props.quotaSettings ? /* @__PURE__ */ React2.createElement("section", { className: "qoder-section", "data-qoder-integrations": "true" }, /* @__PURE__ */ React2.createElement("h3", null, t("integrations")), /* @__PURE__ */ React2.createElement("label", { className: "qoder-toggle" }, /* @__PURE__ */ React2.createElement(
     "input",
     {
       type: "checkbox",
       "data-qoder-quota-toggle": "true",
-      checked: quotaEnabled,
-      disabled: quotaReadOnly || quotaBusy,
+      checked: settings?.enabled === true,
+      disabled: !settings || settings.loading || !settings.writable || settings.failed || toggleBusy,
       onChange: (event) => {
-        void toggleQuota(event.target.checked);
+        setToggleBusy(true);
+        void props.quotaSettings?.set(event.target.checked).finally(() => setToggleBusy(false));
       }
     }
-  ), /* @__PURE__ */ React.createElement("span", null, t("quotaToggle"))), /* @__PURE__ */ React.createElement("small", { style: { opacity: 0.75 } }, t("quotaToggleHint")), quotaSnapshot?.failed === true ? /* @__PURE__ */ React.createElement("small", { role: "alert" }, t("quotaToggleFailed")) : null));
+  ), /* @__PURE__ */ React2.createElement("span", null, t("quotaToggle"))), /* @__PURE__ */ React2.createElement("small", null, t("quotaToggleHint")), settings?.failed ? /* @__PURE__ */ React2.createElement("div", { className: "qoder-inline" }, /* @__PURE__ */ React2.createElement("p", { role: "alert", className: "qoder-warning" }, t("quotaToggleFailed")), /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      type: "button",
+      onClick: () => {
+        void props.quotaSettings?.refresh();
+      }
+    },
+    t("retry")
+  )) : null) : null);
 }
 
 // src/client/copy.ts
@@ -344,6 +939,7 @@ var PANEL_TEXT_ZH = {
   unavailable: "\u5F53\u524D profile \u672A\u6302\u8F7D\u989D\u5EA6\u670D\u52A1\u3002",
   notConfigured: "\u5C1A\u672A\u914D\u7F6E PAT\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u989D\u5EA6\u3002",
   error: "\u989D\u5EA6\u8BFB\u53D6\u5931\u8D25",
+  stale: "\u4E0A\u6B21\u6210\u529F\u6570\u636E\uFF0C\u5F53\u524D\u5237\u65B0\u5931\u8D25",
   usageBlock: "\u989D\u5EA6",
   personalPool: "\u4E2A\u4EBA\u5957\u9910\u989D\u5EA6",
   noPersonalPool: "\u8BE5\u8D26\u6237\u6CA1\u6709\u4E2A\u4EBA\u5957\u9910\u989D\u5EA6\u3002",
@@ -380,6 +976,7 @@ var PANEL_TEXT_EN = {
   unavailable: "The quota service is not mounted in this profile.",
   notConfigured: "No PAT is configured yet, so quota cannot be read.",
   error: "Could not read the quota",
+  stale: "Last successful data; refresh failed",
   usageBlock: "Usage",
   personalPool: "Personal plan credits",
   noPersonalPool: "This account has no personal plan credits.",
@@ -409,8 +1006,8 @@ function qoderPanelText(t) {
 }
 
 // src/client/panel.tsx
-var React2 = __toESM(require("react"), 1);
-var import_react2 = require("react");
+var React3 = __toESM(require("react"), 1);
+var import_react3 = require("react");
 
 // src/quota-view.ts
 var RING_RADIUS = 7.25;
@@ -504,6 +1101,7 @@ function createQuotaController(resolve) {
     if (namespace === void 0) {
       if (ticket !== generation) return;
       snapshot = {
+        ...snapshot,
         status: "error",
         error: QUOTA_REMOTE_UNMOUNTED_ERROR,
         ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
@@ -515,6 +1113,7 @@ function createQuotaController(resolve) {
       const response = await namespace.quota();
       if (ticket !== generation) return;
       snapshot = response.ok ? { status: "ready", report: response.value, fetchedAt: Date.now() } : {
+        ...snapshot,
         status: "error",
         error: response.error?.message ?? "the quota read failed",
         ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
@@ -522,6 +1121,7 @@ function createQuotaController(resolve) {
     } catch (error) {
       if (ticket !== generation) return;
       snapshot = {
+        ...snapshot,
         status: "error",
         error: error instanceof Error ? error.message : String(error),
         ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
@@ -582,7 +1182,7 @@ var visibleNow;
 // src/client/panel.tsx
 var QUOTA_PANEL_ID = "qoder-quota-panel";
 function QuotaRing(props) {
-  return /* @__PURE__ */ React2.createElement("span", { className: "qcp-glyph", "aria-hidden": "true" }, /* @__PURE__ */ React2.createElement("svg", { viewBox: "0 0 20 20", width: props.size, height: props.size, focusable: "false" }, /* @__PURE__ */ React2.createElement("circle", { cx: 10, cy: 10, r: RING_RADIUS, fill: "none", stroke: "currentColor", strokeWidth: 1.5, opacity: 0.4 }), /* @__PURE__ */ React2.createElement(
+  return /* @__PURE__ */ React3.createElement("span", { className: "qcp-glyph", "aria-hidden": "true" }, /* @__PURE__ */ React3.createElement("svg", { viewBox: "0 0 20 20", width: props.size, height: props.size, focusable: "false" }, /* @__PURE__ */ React3.createElement("circle", { cx: 10, cy: 10, r: RING_RADIUS, fill: "none", stroke: "currentColor", strokeWidth: 1.5, opacity: 0.4 }), /* @__PURE__ */ React3.createElement(
     "circle",
     {
       cx: 10,
@@ -599,7 +1199,7 @@ function QuotaRing(props) {
   )));
 }
 function QuotaBar(props) {
-  return /* @__PURE__ */ React2.createElement(
+  return /* @__PURE__ */ React3.createElement(
     "span",
     {
       className: props.large === true ? "qcp-barLg" : "qcp-bar",
@@ -609,16 +1209,16 @@ function QuotaBar(props) {
       "aria-valuemax": 100,
       "aria-valuenow": props.percent
     },
-    /* @__PURE__ */ React2.createElement("span", { className: props.warn ? "qcp-fill qcp-fillWarn" : "qcp-fill", style: { width: `${String(props.percent)}%` } })
+    /* @__PURE__ */ React3.createElement("span", { className: props.warn ? "qcp-fill qcp-fillWarn" : "qcp-fill", style: { width: `${String(props.percent)}%` } })
   );
 }
 function QuotaWindow(props) {
   const { t, pool } = props;
   const percent = percentOf(usedRatio(pool.used, pool.total, pool.percentage));
-  return /* @__PURE__ */ React2.createElement("div", { className: "qcp-window" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-windowHead" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-windowLabel" }, props.label), /* @__PURE__ */ React2.createElement("span", { className: "qcp-windowValue" }, `${formatCredits(pool.used)} / ${formatCredits(pool.total)} ${pool.unit}`), /* @__PURE__ */ React2.createElement("span", { className: "qcp-windowPct" }, `${String(percent)}%`)), /* @__PURE__ */ React2.createElement(QuotaBar, { large: true, percent, warn: props.warn, label: props.label }), /* @__PURE__ */ React2.createElement("span", { className: "qcp-caption" }, `${t.resetAt} ${formatMoment(props.expiresAt, t.lang) ?? t.noDeadline}`));
+  return /* @__PURE__ */ React3.createElement("div", { className: "qcp-window" }, /* @__PURE__ */ React3.createElement("div", { className: "qcp-windowHead" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-windowLabel" }, props.label), /* @__PURE__ */ React3.createElement("span", { className: "qcp-windowValue" }, `${formatCredits(pool.used)} / ${formatCredits(pool.total)} ${pool.unit}`), /* @__PURE__ */ React3.createElement("span", { className: "qcp-windowPct" }, `${String(percent)}%`)), /* @__PURE__ */ React3.createElement(QuotaBar, { large: true, percent, warn: props.warn, label: props.label }), /* @__PURE__ */ React3.createElement("span", { className: "qcp-caption" }, `${t.resetAt} ${formatMoment(props.expiresAt, t.lang) ?? t.noDeadline}`));
 }
 function QuotaTile(props) {
-  return /* @__PURE__ */ React2.createElement("div", { className: "qcp-tile" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-tileLabel" }, props.label), /* @__PURE__ */ React2.createElement("span", { className: props.small === true ? "qcp-tileValue qcp-tileValueSm" : "qcp-tileValue" }, props.value), props.sub === void 0 ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-tileSub", title: props.sub }, props.sub));
+  return /* @__PURE__ */ React3.createElement("div", { className: "qcp-tile" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-tileLabel" }, props.label), /* @__PURE__ */ React3.createElement("span", { className: props.small === true ? "qcp-tileValue qcp-tileValueSm" : "qcp-tileValue" }, props.value), props.sub === void 0 ? null : /* @__PURE__ */ React3.createElement("span", { className: "qcp-tileSub", title: props.sub }, props.sub));
 }
 function useView(props) {
   const t = qoderPanelText(props.t ?? ((key) => PANEL_TEXT_EN[key] ?? key));
@@ -639,7 +1239,7 @@ function QoderQuotaFooterEntry(props) {
   const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
   const { t, snapshot, report } = useView(props);
   const startAutoRefresh = props.startAutoRefresh;
-  (0, import_react2.useEffect)(() => {
+  (0, import_react3.useEffect)(() => {
     if (!enabled || startAutoRefresh === void 0) return void 0;
     return startAutoRefresh();
   }, [enabled, startAutoRefresh]);
@@ -651,21 +1251,21 @@ function QoderQuotaFooterEntry(props) {
     props.open?.();
   };
   if (props.wide === false) {
-    return /* @__PURE__ */ React2.createElement(
+    return /* @__PURE__ */ React3.createElement(
       "button",
       {
         type: "button",
         className: "qcp-rail",
         "data-qoder-quota-card": "true",
         "aria-label": t.cardHint,
-        title: t.cardHint,
+        title: snapshot.status === "error" && report !== void 0 ? `${t.cardHint} \xB7 ${t.stale}` : t.cardHint,
         onClick: open
       },
-      /* @__PURE__ */ React2.createElement(QuotaRing, { percent, warn, size: 18 })
+      /* @__PURE__ */ React3.createElement(QuotaRing, { percent, warn, size: 18 })
     );
   }
   const badge = report?.planTierName;
-  return /* @__PURE__ */ React2.createElement(
+  return /* @__PURE__ */ React3.createElement(
     "button",
     {
       type: "button",
@@ -675,15 +1275,15 @@ function QoderQuotaFooterEntry(props) {
       title: t.cardHint,
       onClick: open
     },
-    /* @__PURE__ */ React2.createElement("span", { className: "qcp-top" }, /* @__PURE__ */ React2.createElement(QuotaRing, { percent, warn, size: 16 }), /* @__PURE__ */ React2.createElement("span", { className: "qcp-name" }, t.cardName), /* @__PURE__ */ React2.createElement("span", { className: "qcp-spacer" }), warn ? /* @__PURE__ */ React2.createElement("span", { className: "qcp-badge qcp-badgeWarn" }, t.exceededShort) : badge === void 0 ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-badge" }, badge)),
-    headline === void 0 ? /* @__PURE__ */ React2.createElement("span", { className: "qcp-caption" }, snapshot.status === "error" ? t.error : t.loading) : /* @__PURE__ */ React2.createElement("span", { className: "qcp-row" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-rowHead" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-rowLabel" }, headline.label === "personal" ? t.personalPool : t.addOnPool), /* @__PURE__ */ React2.createElement("span", { className: "qcp-rowAmount" }, `${formatCredits(headline.pool.used)} / ${formatCredits(headline.pool.total)}`), /* @__PURE__ */ React2.createElement("span", { className: "qcp-rowPct" }, `${String(percent)}%`)), /* @__PURE__ */ React2.createElement(QuotaBar, { percent, warn, label: t.personalPool }), /* @__PURE__ */ React2.createElement("span", { className: "qcp-caption" }, `${t.resetAt} ${formatMoment(report?.expiresAt, t.lang) ?? t.noDeadline}`))
+    /* @__PURE__ */ React3.createElement("span", { className: "qcp-top" }, /* @__PURE__ */ React3.createElement(QuotaRing, { percent, warn, size: 16 }), /* @__PURE__ */ React3.createElement("span", { className: "qcp-name" }, t.cardName), /* @__PURE__ */ React3.createElement("span", { className: "qcp-spacer" }), warn ? /* @__PURE__ */ React3.createElement("span", { className: "qcp-badge qcp-badgeWarn" }, t.exceededShort) : badge === void 0 ? null : /* @__PURE__ */ React3.createElement("span", { className: "qcp-badge" }, badge)),
+    headline === void 0 ? /* @__PURE__ */ React3.createElement("span", { className: "qcp-caption" }, snapshot.status === "error" ? t.error : t.loading) : /* @__PURE__ */ React3.createElement("span", { className: "qcp-row" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-rowHead" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-rowLabel" }, headline.label === "personal" ? t.personalPool : t.addOnPool), /* @__PURE__ */ React3.createElement("span", { className: "qcp-rowAmount" }, `${formatCredits(headline.pool.used)} / ${formatCredits(headline.pool.total)}`), /* @__PURE__ */ React3.createElement("span", { className: "qcp-rowPct" }, `${String(percent)}%`)), /* @__PURE__ */ React3.createElement(QuotaBar, { percent, warn, label: t.personalPool }), /* @__PURE__ */ React3.createElement("span", { className: "qcp-caption" }, snapshot.status === "error" ? t.stale : `${t.resetAt} ${formatMoment(report?.expiresAt, t.lang) ?? t.noDeadline}`))
   );
 }
 function QoderQuotaPanel(props) {
   const { t, snapshot, report } = useView(props);
   const enabled = props.useQuotaSettings?.((state) => state.enabled) ?? false;
   const startAutoRefresh = props.startAutoRefresh;
-  (0, import_react2.useEffect)(() => {
+  (0, import_react3.useEffect)(() => {
     if (startAutoRefresh === void 0) return void 0;
     return startAutoRefresh();
   }, [startAutoRefresh]);
@@ -699,7 +1299,7 @@ function QoderQuotaPanel(props) {
   const cycleEnd = formatShortDay(report?.periodEnd, t.lang);
   const days = daysUntil(report?.expiresAt, now);
   const owner = joinParts([report?.userType, report?.organizationName, report?.organizationRole]);
-  return /* @__PURE__ */ React2.createElement("section", { className: "qcp-main", "data-qoder-quota-panel": "true" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-inner" }, /* @__PURE__ */ React2.createElement("header", { className: "qcp-head" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-headText" }, /* @__PURE__ */ React2.createElement("h2", { className: "qcp-title" }, t.panelTitle), /* @__PURE__ */ React2.createElement("span", { className: "qcp-sub" }, t.panelSubtitle)), /* @__PURE__ */ React2.createElement("div", { className: "qcp-actions" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-meta" }, `${t.refreshedAt} ${refreshed}`), /* @__PURE__ */ React2.createElement(
+  return /* @__PURE__ */ React3.createElement("section", { className: "qcp-main", "data-qoder-quota-panel": "true" }, /* @__PURE__ */ React3.createElement("div", { className: "qcp-inner" }, /* @__PURE__ */ React3.createElement("header", { className: "qcp-head" }, /* @__PURE__ */ React3.createElement("div", { className: "qcp-headText" }, /* @__PURE__ */ React3.createElement("h2", { className: "qcp-title" }, t.panelTitle), /* @__PURE__ */ React3.createElement("span", { className: "qcp-sub" }, t.panelSubtitle)), /* @__PURE__ */ React3.createElement("div", { className: "qcp-actions" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-meta", role: "status" }, `${snapshot.status === "error" && report !== void 0 ? t.stale : t.refreshedAt} \xB7 ${refreshed}`), /* @__PURE__ */ React3.createElement(
     "button",
     {
       type: "button",
@@ -710,7 +1310,7 @@ function QoderQuotaPanel(props) {
       disabled: snapshot.status === "loading"
     },
     snapshot.status === "loading" ? t.loading : t.refresh
-  ), /* @__PURE__ */ React2.createElement(
+  ), /* @__PURE__ */ React3.createElement(
     "button",
     {
       type: "button",
@@ -721,8 +1321,8 @@ function QoderQuotaPanel(props) {
         props.close?.();
       }
     },
-    /* @__PURE__ */ React2.createElement("span", { "aria-hidden": "true" }, "\xD7")
-  ))), exceeded ? /* @__PURE__ */ React2.createElement("div", { className: "qcp-alert", role: "alert" }, /* @__PURE__ */ React2.createElement("strong", null, t.exceeded), /* @__PURE__ */ React2.createElement("span", { className: "qcp-alertDetail" }, t.exceededHint)) : null, failure === void 0 ? null : /* @__PURE__ */ React2.createElement("div", { className: "qcp-alert", role: "alert" }, /* @__PURE__ */ React2.createElement("strong", null, failure.title), failure.detail === void 0 ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-alertDetail" }, failure.detail)), report === void 0 ? /* @__PURE__ */ React2.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-note" }, snapshot.status === "loading" || snapshot.status === "idle" ? t.loading : t.error)) : /* @__PURE__ */ React2.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-identity" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-avatar", "aria-hidden": "true" }, "Q"), /* @__PURE__ */ React2.createElement("div", { className: "qcp-idText" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-planName" }, report.planTierName), owner === "" ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-planOwner" }, owner)), /* @__PURE__ */ React2.createElement("span", { className: "qcp-spacer" }), exceeded ? /* @__PURE__ */ React2.createElement("span", { className: "qcp-badge qcp-badgeWarn" }, t.exceededShort) : null), /* @__PURE__ */ React2.createElement("div", { className: "qcp-divider" }), /* @__PURE__ */ React2.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-blockTitle" }, t.usageBlock), personal === void 0 ? /* @__PURE__ */ React2.createElement("span", { className: "qcp-note" }, t.noPersonalPool) : /* @__PURE__ */ React2.createElement(
+    /* @__PURE__ */ React3.createElement("span", { "aria-hidden": "true" }, "\xD7")
+  ))), exceeded ? /* @__PURE__ */ React3.createElement("div", { className: "qcp-alert", role: "alert" }, /* @__PURE__ */ React3.createElement("strong", null, t.exceeded), /* @__PURE__ */ React3.createElement("span", { className: "qcp-alertDetail" }, t.exceededHint)) : null, failure === void 0 ? null : /* @__PURE__ */ React3.createElement("div", { className: "qcp-alert", role: "alert" }, /* @__PURE__ */ React3.createElement("strong", null, failure.title), failure.detail === void 0 ? null : /* @__PURE__ */ React3.createElement("span", { className: "qcp-alertDetail" }, failure.detail)), report === void 0 ? /* @__PURE__ */ React3.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-note" }, snapshot.status === "loading" || snapshot.status === "idle" ? t.loading : t.error)) : /* @__PURE__ */ React3.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React3.createElement("div", { className: "qcp-identity" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-avatar", "aria-hidden": "true" }, "Q"), /* @__PURE__ */ React3.createElement("div", { className: "qcp-idText" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-planName" }, report.planTierName), owner === "" ? null : /* @__PURE__ */ React3.createElement("span", { className: "qcp-planOwner" }, owner)), /* @__PURE__ */ React3.createElement("span", { className: "qcp-spacer" }), exceeded ? /* @__PURE__ */ React3.createElement("span", { className: "qcp-badge qcp-badgeWarn" }, t.exceededShort) : null), /* @__PURE__ */ React3.createElement("div", { className: "qcp-divider" }), /* @__PURE__ */ React3.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-blockTitle" }, t.usageBlock), personal === void 0 ? /* @__PURE__ */ React3.createElement("span", { className: "qcp-note" }, t.noPersonalPool) : /* @__PURE__ */ React3.createElement(
     QuotaWindow,
     {
       t,
@@ -731,7 +1331,7 @@ function QoderQuotaPanel(props) {
       ...report.expiresAt === void 0 ? {} : { expiresAt: report.expiresAt },
       warn: exceeded
     }
-  )), personal === void 0 ? null : /* @__PURE__ */ React2.createElement("div", { className: "qcp-tiles" }, /* @__PURE__ */ React2.createElement(
+  )), personal === void 0 ? null : /* @__PURE__ */ React3.createElement("div", { className: "qcp-tiles" }, /* @__PURE__ */ React3.createElement(
     QuotaTile,
     {
       label: t.billingCycle,
@@ -739,21 +1339,21 @@ function QoderQuotaPanel(props) {
       ...formatYearSpan(report.periodStart, report.periodEnd) === void 0 ? {} : { sub: formatYearSpan(report.periodStart, report.periodEnd) },
       small: true
     }
-  ), /* @__PURE__ */ React2.createElement(
+  ), /* @__PURE__ */ React3.createElement(
     QuotaTile,
     {
       label: t.used,
       value: `${formatCredits(personal.used)} ${personal.unit}`,
       sub: `${t.limit} ${formatCredits(personal.total)} ${personal.unit}`
     }
-  ), /* @__PURE__ */ React2.createElement(
+  ), /* @__PURE__ */ React3.createElement(
     QuotaTile,
     {
       label: t.remaining,
       value: `${formatCredits(personal.remaining)} ${personal.unit}`,
       sub: `${String(Math.max(0, 100 - percent))}%`
     }
-  ), /* @__PURE__ */ React2.createElement(
+  ), /* @__PURE__ */ React3.createElement(
     QuotaTile,
     {
       label: t.resetAt,
@@ -761,7 +1361,7 @@ function QoderQuotaPanel(props) {
       ...days === void 0 ? {} : { sub: `${String(days)} ${t.daysLeftSuffix}` },
       small: true
     }
-  ))), report?.addOnPool === void 0 ? null : /* @__PURE__ */ React2.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-blockTitle" }, t.addOnPool), /* @__PURE__ */ React2.createElement(
+  ))), report?.addOnPool === void 0 ? null : /* @__PURE__ */ React3.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React3.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-blockTitle" }, t.addOnPool), /* @__PURE__ */ React3.createElement(
     QuotaWindow,
     {
       t,
@@ -770,7 +1370,7 @@ function QoderQuotaPanel(props) {
       ...report.expiresAt === void 0 ? {} : { expiresAt: report.expiresAt },
       warn: false
     }
-  ))), organizationActive ? /* @__PURE__ */ React2.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React2.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React2.createElement("span", { className: "qcp-blockTitle" }, t.organizationPool), /* @__PURE__ */ React2.createElement(
+  ))), organizationActive ? /* @__PURE__ */ React3.createElement("div", { className: "qcp-card" }, /* @__PURE__ */ React3.createElement("div", { className: "qcp-block" }, /* @__PURE__ */ React3.createElement("span", { className: "qcp-blockTitle" }, t.organizationPool), /* @__PURE__ */ React3.createElement(
     QuotaWindow,
     {
       t,
@@ -779,90 +1379,61 @@ function QoderQuotaPanel(props) {
       ...report?.expiresAt === void 0 ? {} : { expiresAt: report.expiresAt },
       warn: false
     }
-  ))) : organization === void 0 ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-note" }, t.orgPoolDormant), /* @__PURE__ */ React2.createElement("div", { className: "qcp-panelFoot" }, report?.upgradeUrl === void 0 ? null : /* @__PURE__ */ React2.createElement("a", { className: "qcp-link", href: report.upgradeUrl, target: "_blank", rel: "noreferrer" }, t.upgrade), enabled ? null : /* @__PURE__ */ React2.createElement("span", { className: "qcp-note" }, t.settingsToggleHint))));
+  ))) : organization === void 0 ? null : /* @__PURE__ */ React3.createElement("span", { className: "qcp-note" }, t.orgPoolDormant), /* @__PURE__ */ React3.createElement("div", { className: "qcp-panelFoot" }, report?.upgradeUrl === void 0 ? null : /* @__PURE__ */ React3.createElement("a", { className: "qcp-link", href: report.upgradeUrl, target: "_blank", rel: "noreferrer" }, t.upgrade), enabled ? null : /* @__PURE__ */ React3.createElement("span", { className: "qcp-note" }, t.settingsToggleHint))));
 }
 
-// src/client/settings.ts
-var SETTINGS_NS = "llm-qoder";
-var SHOW_SIDEBAR_QUOTA_FIELD = "showSidebarQuota";
-function recordOf(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
-}
-function rowFor(response) {
-  if (!response.ok) return void 0;
-  return response.value.namespaces?.find((entry) => entry.ns === SETTINGS_NS);
-}
-function createQuotaSettingsFace(resolve) {
-  let snapshot = { enabled: false, loading: true, writable: true, failed: false };
-  let revision;
-  const listeners = /* @__PURE__ */ new Set();
-  const publish = () => {
-    for (const listener of listeners) listener();
+// src/client/provider-styles.ts
+var PROVIDER_CSS = `
+[data-qoder-models-card] { --qoder-line:var(--dsw-alias-border-l2,rgba(127,127,127,.24)); --qoder-bg:var(--dsw-alias-bg-module-platform,rgba(127,127,127,.055)); color:var(--dsw-alias-label-primary,inherit); font-size:13px; line-height:1.5; width:100%; min-width:0; border:1px solid var(--qoder-line); border-radius:16px; overflow:hidden; background:var(--dsw-alias-bg-module,transparent); }
+[data-qoder-models-card] * { box-sizing:border-box; }
+[data-qoder-models-card] .qoder-header { padding:22px 24px; display:flex; justify-content:space-between; gap:16px; align-items:center; background:var(--qoder-bg); border-bottom:1px solid var(--qoder-line); }
+[data-qoder-models-card] .qoder-brand { display:flex; align-items:center; gap:12px; }
+[data-qoder-models-card] .qoder-monogram { background:var(--dsw-alias-brand-primary,#4d6bfe); color:#fff; border-radius:12px; height:42px; width:42px; display:grid; place-items:center; font-size:25px; font-weight:700; }
+[data-qoder-models-card] .qoder-title { font-size:18px; font-weight:650; letter-spacing:-.4px; }
+[data-qoder-models-card] .qoder-status { border:1px solid var(--qoder-line); border-radius:20px; padding:4px 10px; font-size:12px; }
+[data-qoder-models-card] .qoder-section { padding:22px 24px; border-bottom:1px solid var(--qoder-line); display:grid; gap:12px; }
+[data-qoder-models-card] .qoder-section:last-child { border-bottom:0; }
+[data-qoder-models-card] .qoder-section-heading { display:flex; gap:12px; align-items:center; justify-content:space-between; }
+[data-qoder-models-card] h3,[data-qoder-models-card] h4,[data-qoder-models-card] p { margin:0; }
+[data-qoder-models-card] h3 { font-size:14px; font-weight:650; }
+[data-qoder-models-card] h4 { font-size:12px; opacity:.75; text-transform:uppercase; letter-spacing:.04em; }
+[data-qoder-models-card] .qoder-muted,[data-qoder-models-card] small { opacity:.7; font-size:12px; }
+[data-qoder-models-card] .qoder-inline { display:flex; gap:8px; align-items:center; }
+[data-qoder-models-card] input:not([type=checkbox]),[data-qoder-models-card] select { min-width:0; width:100%; color:inherit; background:var(--qoder-bg); border:1px solid var(--qoder-line); padding:9px 10px; border-radius:8px; font:inherit; }
+[data-qoder-models-card] select option { color:var(--dsw-alias-label-primary,#222); background:var(--dsw-alias-bg-module,#fff); }
+[data-qoder-models-card] input:focus-visible,[data-qoder-models-card] select:focus-visible,[data-qoder-models-card] button:focus-visible,[data-qoder-models-card] summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#5476de); outline-offset:3px; }
+[data-qoder-models-card] button { color:inherit; border:1px solid var(--qoder-line); background:var(--qoder-bg); padding:7px 12px; border-radius:8px; font:inherit; cursor:pointer; white-space:nowrap; }
+[data-qoder-models-card] button:hover:not(:disabled) { background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.15)); }
+[data-qoder-models-card] :disabled { opacity:.45; cursor:not-allowed; }
+[data-qoder-models-card] .qoder-capacity-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+[data-qoder-models-card] .qoder-capacity-input,[data-qoder-models-card] label:not(.qoder-toggle) { display:grid; gap:6px; }
+[data-qoder-models-card] .qoder-layer { font-size:11px; opacity:.65; }
+[data-qoder-models-card] .qoder-subtle { justify-self:start; background:transparent; font-size:12px; }
+[data-qoder-models-card] details { border:1px solid var(--qoder-line); border-radius:9px; }
+[data-qoder-models-card] summary { padding:11px 12px; cursor:pointer; font-weight:550; }
+[data-qoder-models-card] summary small { display:block; font-weight:400; overflow-wrap:anywhere; }
+[data-qoder-models-card] .qoder-model { margin:0 12px 12px; padding:0 12px 12px; }
+[data-qoder-models-card] .qoder-model>summary { margin:0 -12px 12px; }
+[data-qoder-models-card] .qoder-facts { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:11px; padding:12px 0; margin:0; }
+[data-qoder-models-card] dt { opacity:.65; }
+[data-qoder-models-card] dd { margin:0; overflow-wrap:anywhere; text-align:right; font-variant-numeric:tabular-nums; }
+[data-qoder-models-card] .qoder-warning { color:var(--dsw-alias-state-warning-primary,#b87925); padding:9px 11px; border-left:2px solid currentColor; background:var(--qoder-bg); font-size:12px; }
+[data-qoder-models-card] .qoder-success { color:var(--dsw-alias-state-success-primary,#36896a); font-size:12px; }
+[data-qoder-models-card] .qoder-toggle { display:flex; gap:10px; align-items:center; }
+[data-qoder-models-card] .qoder-quota-number { font-size:25px; font-weight:650; font-variant-numeric:tabular-nums; letter-spacing:-.7px; }
+@media(max-width:540px) { [data-qoder-models-card] .qoder-capacity-grid { grid-template-columns:1fr; } [data-qoder-models-card] .qoder-header,[data-qoder-models-card] .qoder-section { padding:16px; } [data-qoder-models-card] .qoder-header { align-items:flex-start; flex-wrap:wrap; } [data-qoder-models-card] .qoder-facts { grid-template-columns:1fr; } [data-qoder-models-card] dd { text-align:left; } }
+`;
+function injectProviderStyles() {
+  if (typeof document === "undefined") return () => {
   };
-  const refresh = async () => {
-    const settings = resolve();
-    if (settings === void 0) {
-      snapshot = { enabled: false, loading: false, writable: false, failed: false };
-      publish();
-      return;
-    }
-    try {
-      const response = await settings.describe();
-      const row = rowFor(response);
-      if (row !== void 0 && typeof row.revision === "number") revision = row.revision;
-      const value = recordOf(row?.value);
-      snapshot = {
-        enabled: value?.[SHOW_SIDEBAR_QUOTA_FIELD] === true,
-        loading: false,
-        writable: response.ok ? response.value.writable !== false : false,
-        failed: false
-      };
-    } catch {
-      snapshot = { ...snapshot, loading: false, writable: false, failed: true };
-    }
-    publish();
+  const existing = document.getElementById("qoder-provider-styles");
+  if (existing) return () => {
   };
-  void refresh();
-  return {
-    getSnapshot: () => snapshot,
-    subscribe: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    refresh,
-    set: async (value) => {
-      const settings = resolve();
-      if (settings === void 0) {
-        snapshot = { ...snapshot, failed: true };
-        publish();
-        return false;
-      }
-      try {
-        let response = await settings.mutate(
-          SETTINGS_NS,
-          [{ op: "set", path: [SHOW_SIDEBAR_QUOTA_FIELD], value }],
-          revision
-        );
-        if (!response.ok) {
-          await refresh();
-          response = await settings.mutate(
-            SETTINGS_NS,
-            [{ op: "set", path: [SHOW_SIDEBAR_QUOTA_FIELD], value }],
-            revision
-          );
-        }
-        await refresh();
-        const accepted = response.ok;
-        snapshot = { ...snapshot, failed: !accepted, enabled: accepted ? value : snapshot.enabled };
-        publish();
-        return accepted;
-      } catch {
-        snapshot = { ...snapshot, failed: true };
-        publish();
-        return false;
-      }
-    }
-  };
+  const style = document.createElement("style");
+  style.id = "qoder-provider-styles";
+  style.textContent = PROVIDER_CSS;
+  document.head.appendChild(style);
+  return () => style.remove();
 }
 
 // src/client/index.ts
@@ -877,16 +1448,18 @@ function stringAt(value, key) {
   return typeof candidate === "string" && candidate.trim().length > 0 ? candidate.trim() : void 0;
 }
 async function apiKeyRef(settings) {
-  if (settings === void 0) return DEFAULT_REF;
+  if (settings === void 0) throw new Error("Settings service unavailable");
   try {
     const response = await settings.describe();
-    if (!response.ok) return DEFAULT_REF;
-    const namespace = response.value.namespaces?.find((entry) => entry.ns === SETTINGS_NS);
+    if (!response.ok) throw new Error("Settings read failed");
+    const namespace = response.value.namespaces?.find(
+      (entry) => entry.ns === SETTINGS_NS
+    );
     const root = namespace?.value;
     const providers = recordOf2(recordOf2(root)?.providers);
     return stringAt(providers?.[PROVIDER], "apiKeyEnv") ?? stringAt(root, "apiKeyEnv") ?? DEFAULT_REF;
   } catch {
-    return DEFAULT_REF;
+    throw new Error("Settings read failed");
   }
 }
 function createCredentialFace(credentials, settings) {
@@ -896,14 +1469,19 @@ function createCredentialFace(credentials, settings) {
     writable: true,
     loading: true
   };
+  let generation = 0;
   const listeners = /* @__PURE__ */ new Set();
   const publish = () => {
     for (const listener of listeners) listener();
   };
   const refresh = async () => {
-    const ref = await apiKeyRef(settings());
+    const ticket = ++generation;
+    snapshot = { ...snapshot, loading: true };
+    publish();
     try {
+      const ref = await apiKeyRef(settings());
       const response = await credentials.describe([ref]);
+      if (ticket !== generation) return;
       if (response.ok) {
         const state = response.value[ref];
         snapshot = {
@@ -916,16 +1494,17 @@ function createCredentialFace(credentials, settings) {
         snapshot = {
           ref,
           configured: false,
-          writable: true,
+          writable: false,
           loading: false,
           error: response.error?.message ?? "credential status unavailable"
         };
       }
     } catch (error) {
+      if (ticket !== generation) return;
       snapshot = {
-        ref,
+        ref: snapshot.ref,
         configured: false,
-        writable: true,
+        writable: false,
         loading: false,
         error: error instanceof Error ? error.message : String(error)
       };
@@ -941,9 +1520,10 @@ function createCredentialFace(credentials, settings) {
     },
     refresh,
     set: async (value) => {
-      const ref = await apiKeyRef(settings());
+      if (snapshot.loading || !snapshot.writable || snapshot.error) return false;
       let response;
       try {
+        const ref = await apiKeyRef(settings());
         response = await credentials.set(ref, value);
       } catch {
         await refresh();
@@ -961,6 +1541,7 @@ function selectPanel(ctx, id) {
 }
 var locale2 = {
   zh: {
+    ...CAPACITY_ZH,
     title: "Qoder CN",
     configured: "PAT \u5DF2\u914D\u7F6E",
     notConfigured: "\u5C1A\u672A\u914D\u7F6E PAT",
@@ -977,6 +1558,7 @@ var locale2 = {
     quotaToggleFailed: "\u5F00\u5173\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002"
   },
   en: {
+    ...CAPACITY_EN,
     title: "Qoder CN",
     configured: "PAT configured",
     notConfigured: "PAT not configured",
@@ -995,25 +1577,45 @@ var locale2 = {
 };
 function apply(ctx) {
   ctx.effect(() => ctx.locale.register("settings.qoder", locale2));
-  ctx.effect(() => ctx.locale.register(PANEL_LOCALE_NS, { zh: PANEL_TEXT_ZH, en: PANEL_TEXT_EN }));
+  ctx.effect(
+    () => ctx.locale.register(PANEL_LOCALE_NS, {
+      zh: PANEL_TEXT_ZH,
+      en: PANEL_TEXT_EN
+    })
+  );
   ctx.effect(() => injectQuotaStyles(), "dsh-provider-qoder: quota styles");
+  ctx.effect(
+    () => injectProviderStyles(),
+    "dsh-provider-qoder: provider styles"
+  );
   let settings;
-  const quotaSettings = createQuotaSettingsFace(() => settings);
+  const { quota: quotaSettings, capacity: capacitySettings } = createSettingsFaces(() => settings);
+  let credentialFace;
   let quotaNamespace;
   const quota = createQuotaController(() => quotaNamespace);
+  const models = createModelsFace(
+    () => quotaNamespace
+  );
   void ctx.remote.$mount(QUOTA_REMOTE_CONTRIBUTION).then(
     (dispose) => {
-      ctx.effect(() => () => {
-        void dispose();
-      }, "dsh-provider-qoder: quota remote");
+      ctx.effect(
+        () => () => {
+          void dispose();
+        },
+        "dsh-provider-qoder: quota remote"
+      );
     },
     (error) => {
-      console.error("[dsh-provider-qoder] could not mount the quota remote:", error);
+      console.error(
+        "[dsh-provider-qoder] could not mount the quota remote:",
+        error
+      );
     }
   );
   ctx.inject(["remote.qoder"], (quotaCtx) => {
     quotaNamespace = quotaCtx.remote.qoder;
     void quota.refresh();
+    void models.refresh();
     quotaCtx.effect(() => () => {
       quotaNamespace = void 0;
     });
@@ -1034,39 +1636,81 @@ function apply(ctx) {
     }
   });
   try {
-    ctx.slots.inject("main", () => ctx.slots.register(
-      { name: "main", key: QUOTA_PANEL_ID, locale: PANEL_LOCALE_NS, inject: panelFace },
-      QoderQuotaPanel
-    ));
+    ctx.slots.inject(
+      "main",
+      () => ctx.slots.register(
+        {
+          name: "main",
+          key: QUOTA_PANEL_ID,
+          locale: PANEL_LOCALE_NS,
+          inject: panelFace
+        },
+        QoderQuotaPanel
+      )
+    );
   } catch (error) {
-    console.error("[dsh-provider-qoder] could not register the quota panel:", error);
+    console.error(
+      "[dsh-provider-qoder] could not register the quota panel:",
+      error
+    );
   }
   ctx.inject(["layout"], (layoutCtx) => {
     try {
-      layoutCtx.slots.inject("sidebar.footer.action", () => layoutCtx.slots.register(
-        { name: "sidebar.footer.action", id: QUOTA_PANEL_ID, order: 1, locale: PANEL_LOCALE_NS, inject: panelFace },
-        QoderQuotaFooterEntry
-      ));
+      layoutCtx.slots.inject(
+        "sidebar.footer.action",
+        () => layoutCtx.slots.register(
+          {
+            name: "sidebar.footer.action",
+            id: QUOTA_PANEL_ID,
+            order: 1,
+            locale: PANEL_LOCALE_NS,
+            inject: panelFace
+          },
+          QoderQuotaFooterEntry
+        )
+      );
     } catch (error) {
-      console.error("[dsh-provider-qoder] could not register the sidebar quota card:", error);
+      console.error(
+        "[dsh-provider-qoder] could not register the sidebar quota card:",
+        error
+      );
     }
   });
   ctx.inject(["remote.settings"], (settingsCtx) => {
     settings = settingsCtx.remote.settings;
-    void quotaSettings.refresh();
+    void capacitySettings.refresh();
+    void credentialFace?.refresh();
     settingsCtx.effect(() => () => {
       settings = void 0;
+      void capacitySettings.refresh();
+      void credentialFace?.refresh();
     });
   });
   ctx.inject(["remote.credentials"], (credentialsCtx) => {
     const credentials = credentialsCtx.remote.credentials;
     const face = createCredentialFace(credentials, () => settings);
-    ctx.slots.inject("settings.models.provider-card", () => ctx.slots.register({
-      name: "settings.models.provider-card",
-      key: SETTINGS_NS,
-      locale: "settings.qoder",
-      inject: () => ({ credential: face, quotaSettings })
-    }, QoderProviderCard));
+    credentialFace = face;
+    ctx.slots.inject(
+      "settings.models.provider-card",
+      () => ctx.slots.register(
+        {
+          name: "settings.models.provider-card",
+          key: SETTINGS_NS,
+          locale: "settings.qoder",
+          inject: () => ({
+            credential: face,
+            quotaSettings,
+            capacitySettings,
+            models,
+            quota,
+            openQuota: () => {
+              selectPanel(ctx, QUOTA_PANEL_ID);
+            }
+          })
+        },
+        QoderProviderCard
+      )
+    );
   });
 }
 var inject = ["slots", "locale", "remote"];
