@@ -26,7 +26,11 @@ A step-by-step record of a real setup — what was opened, where it was installe
 
 ## PAT configuration
 
-After opening the `qoder-cn` row's **Edit** card in **Models**, paste the PAT into the Qoder card and click **Save**. The client extension writes it through the DSH credentials service under `QODERCN_PERSONAL_ACCESS_TOKEN`; the PAT is not written to the settings document.
+**Where the token comes from**: open **https://qoder.cn/**, choose **企业登录** (enterprise sign-in), and authenticate with your organisation account over SSO — a university address works. Then open your profile, pick **服务集成** in the left rail, and use **+ 新建令牌** under 个人访问令牌. The token is shown **once**; copy it then — it looks like `pt-...`.
+
+After opening the `qoder-cn` row's **Edit** card in **Models**, paste the PAT into the Qoder card and click **Save**; the card reads **PAT 已配置** once it lands. The client extension writes it through the DSH credentials service under `QODERCN_PERSONAL_ACCESS_TOKEN`; the PAT is not written to the settings document.
+
+If you lose the token, there is no recovery — return to 服务集成, delete the old entry, and create a new one; revocation happens on the same page.
 
 If the client card is unavailable, configure the Qoder PAT in the launch environment before starting or restarting Desktop:
 

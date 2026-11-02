@@ -26,7 +26,11 @@
 
 ## PAT 配置
 
-在 **Models** 中打开 `qoder-cn` 那一行的 **Edit** 卡片后，把 PAT 粘贴进 Qoder 卡片并点击 **Save**。客户端扩展会通过 DSH 凭据服务以 `QODERCN_PERSONAL_ACCESS_TOKEN` 写入；PAT 不会被写进设置文档。
+**令牌从哪来**：浏览器打开 **https://qoder.cn/** → 点 **企业登录**，用学校/公司邮箱走 SSO（例如交大邮箱）→ 登录后进个人主页 → 左侧栏 **服务集成** → 「个人访问令牌」区块点 **+ 新建令牌** → 创建后**只显示一次**，立刻复制，形如 `pt-...`。
+
+在 **Models** 中打开 `qoder-cn` 那一行的 **Edit** 卡片后，把 PAT 粘贴进 Qoder 卡片并点击 **Save**。卡片右上显示「PAT 已配置」即写入成功。客户端扩展会通过 DSH 凭据服务以 `QODERCN_PERSONAL_ACCESS_TOKEN` 写入；PAT 不会被写进设置文档。
+
+令牌丢了不用慌：回 **服务集成** 删掉旧的、建一个新的即可；吊销也在同一页面。
 
 如果客户端卡片不可用，可以在启动或重启 Desktop 之前，在启动环境里配置 Qoder PAT：
 
