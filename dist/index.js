@@ -112,6 +112,15 @@ function qoderCnEndpoints(vpcInstance) {
     manage: "https://qoder.com.cn"
   };
 }
+function qoderExchangeUrl(endpoints) {
+  return `${endpoints.openapi}/api/v1/jobToken/exchange`;
+}
+function qoderJobTokenRefreshUrl(endpoints) {
+  return `${endpoints.openapi}/api/v1/jobToken/refresh`;
+}
+function qoderUserInfoUrl(endpoints) {
+  return `${endpoints.openapi}/api/v1/userinfo`;
+}
 function qoderChatUrl(endpoints) {
   return `${endpoints.gateway}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`;
 }
@@ -301,6 +310,18 @@ function qoderEncodeBody(plaintext) {
 
 // src/pat.ts
 var UA = "dsh-llm-qoder";
+var QoderTokenError = class extends Error {
+  /**
+   * @param message - human-readable failure, already naming the operation.
+   * @param status - the HTTP status the endpoint answered with.
+   */
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+    this.name = "QoderTokenError";
+  }
+  status;
+};
 function parseExpiry(data) {
   if (data.expires_at) {
     const parsed = Date.parse(data.expires_at);
@@ -312,7 +333,7 @@ function parseExpiry(data) {
   return Date.now() + 24 * 60 * 60 * 1e3;
 }
 async function exchangeJobToken(pat, endpoints, signal) {
-  const res = await fetch(`${endpoints.openapi}/api/v1/jobToken/exchange`, {
+  const res = await fetch(qoderExchangeUrl(endpoints), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -329,7 +350,10 @@ async function exchangeJobToken(pat, endpoints, signal) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Qoder CN PAT exchange failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`);
+    throw new QoderTokenError(
+      `Qoder CN PAT exchange failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`,
+      res.status
+    );
   }
   const data = await res.json();
   if (!data.token) {
@@ -345,7 +369,7 @@ async function refreshJobToken(jobRefreshToken, endpoints, signal) {
   if (jobRefreshToken.trim().length === 0) {
     throw new Error("Qoder CN job token refresh requires a non-empty refresh_token (jrt-...)");
   }
-  const res = await fetch(`${endpoints.openapi}/api/v1/jobToken/refresh`, {
+  const res = await fetch(qoderJobTokenRefreshUrl(endpoints), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -361,7 +385,10 @@ async function refreshJobToken(jobRefreshToken, endpoints, signal) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Qoder CN job token refresh failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`);
+    throw new QoderTokenError(
+      `Qoder CN job token refresh failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`,
+      res.status
+    );
   }
   const data = await res.json();
   if (!data.token) {
@@ -374,31 +401,30 @@ async function refreshJobToken(jobRefreshToken, endpoints, signal) {
   };
 }
 async function fetchUserInfo(jobToken, endpoints, signal) {
-  let userID = "";
-  let email = "";
-  let name2 = "";
-  try {
-    const res = await fetch(`${endpoints.openapi}/api/v1/userinfo`, {
-      headers: {
-        Authorization: `Bearer ${jobToken}`,
-        Accept: "application/json",
-        "Accept-Encoding": "identity",
-        "User-Agent": UA,
-        "Cosy-Version": "1.0.1",
-        "Cosy-ClientType": "5"
-      },
-      signal
-    });
-    if (res.ok) {
-      const info = await res.json();
-      userID = info.id || "";
-      email = info.email || "";
-      name2 = info.name || info.username || "";
-    }
-  } catch (error) {
-    if (signal?.aborted) throw error;
+  const res = await fetch(qoderUserInfoUrl(endpoints), {
+    headers: {
+      Authorization: `Bearer ${jobToken}`,
+      Accept: "application/json",
+      "Accept-Encoding": "identity",
+      "User-Agent": UA,
+      "Cosy-Version": "1.0.1",
+      "Cosy-ClientType": "5"
+    },
+    signal
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new QoderTokenError(
+      `Qoder CN identity lookup failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`,
+      res.status
+    );
   }
-  return { userID, email, name: name2 };
+  const info = await res.json();
+  return {
+    userID: info.id || "",
+    email: info.email || "",
+    name: info.name || info.username || ""
+  };
 }
 
 // src/usage.ts
@@ -500,31 +526,23 @@ function parseOpenApiUsage(payload) {
   return report;
 }
 async function getJson(url, jobToken, signal) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), QUOTA_TIMEOUT_MS);
-  const abort = () => controller.abort();
-  signal?.addEventListener("abort", abort, { once: true });
-  try {
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${jobToken}`,
-        Accept: "application/json",
-        // The desktop injects HTTP_PROXY, and the proxy can answer without the
-        // content-encoding header — an identity body is the only reliably
-        // decodable form (same reason the model catalog asks for identity).
-        "Accept-Encoding": "identity"
-      },
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      throw new Error(`Qoder CN quota request to ${url} failed with HTTP ${response.status}`);
-    }
-    return await response.json();
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", abort);
+  const timeout = AbortSignal.timeout(QUOTA_TIMEOUT_MS);
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${jobToken}`,
+      Accept: "application/json",
+      // The desktop injects HTTP_PROXY, and the proxy can answer without the
+      // content-encoding header — an identity body is the only reliably
+      // decodable form (same reason the model catalog asks for identity).
+      "Accept-Encoding": "identity"
+    },
+    signal: signal === void 0 ? timeout : AbortSignal.any([signal, timeout])
+  });
+  if (!response.ok) {
+    throw new Error(`Qoder CN quota request to ${url} failed with HTTP ${response.status}`);
   }
+  return await response.json();
 }
 function emptyPool() {
   return { total: 0, used: 0, remaining: 0, percentage: 0, unit: "credits", available: true };
@@ -685,9 +703,7 @@ async function serializeRequest(options, attachments) {
 function lastUserText(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (msg !== void 0 && msg.role === "user") {
-      return getBlocksText(msg.content.filter((block) => block.type !== "tool-result"));
-    }
+    if (msg !== void 0 && msg.role === "user") return getBlocksText(msg.content);
   }
   return "";
 }
@@ -714,17 +730,15 @@ async function* parseQoderSse(stream) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      let lineEnd = buffer.indexOf("\n");
-      while (lineEnd !== -1) {
-        const line = buffer.slice(0, lineEnd).replace(/\r$/, "").trim();
-        buffer = buffer.slice(lineEnd + 1);
-        if (line.startsWith("data:")) {
-          const payload = line.slice(5).trim();
-          sawPayload = true;
-          yield payload;
-          if (payload === DONE) return;
-        }
-        lineEnd = buffer.indexOf("\n");
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const raw of lines) {
+        const line = raw.replace(/\r$/, "").trim();
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        sawPayload = true;
+        yield payload;
+        if (payload === DONE) return;
       }
     }
     const tail = buffer.replace(/\r$/, "").trim();
@@ -754,34 +768,58 @@ var THINKING_TAG_VARIANTS = [
   { open: "<reasoning>", close: "</reasoning>" },
   { open: "<thought>", close: "</thought>" }
 ];
-function splitThinking(chunk) {
-  const pieces = [];
-  let cursor = 0;
-  let currentKind = "text";
-  let current = [];
-  const flush = (kind) => {
-    const text = current.join("");
-    if (text.length > 0) pieces.push({ kind, text });
-    current = [];
-  };
-  while (cursor < chunk.length) {
-    let matched = false;
-    for (const variant of THINKING_TAG_VARIANTS) {
-      const open = currentKind === "text" ? variant.open : variant.close;
-      if (chunk.startsWith(open, cursor)) {
-        flush(currentKind);
-        currentKind = currentKind === "text" ? "reasoning" : "text";
-        cursor += open.length;
-        matched = true;
-        break;
+var OPEN_TAGS = THINKING_TAG_VARIANTS.map((variant) => variant.open);
+var CLOSE_TAGS = THINKING_TAG_VARIANTS.map((variant) => variant.close);
+var MAX_TAG_LENGTH = Math.max(...OPEN_TAGS.map((tag) => tag.length), ...CLOSE_TAGS.map((tag) => tag.length));
+function tagsFor(kind) {
+  return kind === "text" ? OPEN_TAGS : CLOSE_TAGS;
+}
+function isPartialTag(rest, kind) {
+  return tagsFor(kind).some((tag) => tag.length > rest.length && tag.startsWith(rest));
+}
+function createThinkingSplitter() {
+  let kind = "text";
+  let held = "";
+  const piecesOf = (text) => text.length === 0 ? [] : [{ kind, text }];
+  const push = (chunk) => {
+    const input = held + chunk;
+    held = "";
+    const pieces = [];
+    let buffer = "";
+    let cursor = 0;
+    const flush = () => {
+      pieces.push(...piecesOf(buffer));
+      buffer = "";
+    };
+    while (cursor < input.length) {
+      const matched = tagsFor(kind).find((tag) => input.startsWith(tag, cursor));
+      if (matched !== void 0) {
+        flush();
+        kind = kind === "text" ? "reasoning" : "text";
+        cursor += matched.length;
+        continue;
       }
+      if (input.length - cursor < MAX_TAG_LENGTH) {
+        const rest = input.slice(cursor);
+        if (isPartialTag(rest, kind)) {
+          held = rest;
+          break;
+        }
+      }
+      buffer += input.charAt(cursor);
+      cursor += 1;
     }
-    if (matched) continue;
-    current.push(chunk.charAt(cursor));
-    cursor++;
-  }
-  flush(currentKind);
-  return pieces;
+    flush();
+    return pieces;
+  };
+  return {
+    push,
+    flush: () => {
+      const pieces = piecesOf(held);
+      held = "";
+      return pieces;
+    }
+  };
 }
 
 // src/translate.ts
@@ -847,8 +885,33 @@ async function* translate(envelopes, reasoningEnabled = true) {
     order.push(block);
     return block;
   };
+  const thinking = reasoningEnabled ? createThinkingSplitter() : void 0;
+  const emitPieces = (pieces) => {
+    const chunks = [];
+    for (const piece of pieces) {
+      if (piece.kind === "reasoning") {
+        if (!reasoningBlock) {
+          reasoningBlock = open("reasoning");
+          chunks.push({ type: "block-start", index: reasoningBlock.index, blockType: "reasoning" });
+        }
+        reasoningBlock.text += piece.text;
+        chunks.push({ type: "reasoning-delta", index: reasoningBlock.index, text: piece.text });
+      } else {
+        if (!textBlock) {
+          textBlock = open("text");
+          chunks.push({ type: "block-start", index: textBlock.index, blockType: "text" });
+        }
+        textBlock.text += piece.text;
+        chunks.push({ type: "text-delta", index: textBlock.index, text: piece.text });
+      }
+    }
+    return chunks;
+  };
   for await (const item of envelopes) {
     if (item === DONE) {
+      if (thinking !== void 0) {
+        for (const chunk of emitPieces(thinking.flush())) yield chunk;
+      }
       for (const block of order) {
         yield { type: "block-end", index: block.index, block: closeBlock(block) };
       }
@@ -863,12 +926,7 @@ async function* translate(envelopes, reasoningEnabled = true) {
       };
       return;
     }
-    let envelope;
-    if (typeof item === "string") {
-      envelope = JSON.parse(item);
-    } else {
-      envelope = item;
-    }
+    const envelope = item;
     if (envelope.statusCodeValue !== 200) {
       throw new LlmError3(
         `Qoder upstream status ${envelope.statusCodeValue}: ${String(envelope.body).slice(0, 200)}`,
@@ -899,25 +957,8 @@ async function* translate(envelopes, reasoningEnabled = true) {
       }
       const content = delta?.content;
       if (typeof content === "string" && content.length > 0) {
-        if (reasoningEnabled) {
-          const pieces = splitThinking(content);
-          for (const piece of pieces) {
-            if (piece.kind === "reasoning") {
-              if (!reasoningBlock) {
-                reasoningBlock = open("reasoning");
-                yield { type: "block-start", index: reasoningBlock.index, blockType: "reasoning" };
-              }
-              reasoningBlock.text += piece.text;
-              yield { type: "reasoning-delta", index: reasoningBlock.index, text: piece.text };
-            } else {
-              if (!textBlock) {
-                textBlock = open("text");
-                yield { type: "block-start", index: textBlock.index, blockType: "text" };
-              }
-              textBlock.text += piece.text;
-              yield { type: "text-delta", index: textBlock.index, text: piece.text };
-            }
-          }
+        if (thinking !== void 0) {
+          for (const chunk of emitPieces(thinking.push(content))) yield chunk;
         } else {
           if (!textBlock) {
             textBlock = open("text");
@@ -985,14 +1026,16 @@ function parsePromotion(raw) {
   const windowStart = trimmed(record2.window_start);
   const windowEnd = trimmed(record2.window_end);
   if (badge === void 0 && (windowStart === void 0 || windowEnd === void 0)) return void 0;
+  const timezone = trimmed(record2.timezone);
+  const discountFactor = positiveNumber(record2.discount_factor);
   return {
     ...typeof record2.active === "boolean" ? { active: record2.active } : {},
     badge: badge ?? {},
     ...description === void 0 ? {} : { description },
     ...windowStart === void 0 ? {} : { windowStart },
     ...windowEnd === void 0 ? {} : { windowEnd },
-    ...trimmed(record2.timezone) === void 0 ? {} : { timezone: trimmed(record2.timezone) },
-    ...positiveNumber(record2.discount_factor) === void 0 ? {} : { discountFactor: positiveNumber(record2.discount_factor) }
+    ...timezone === void 0 ? {} : { timezone },
+    ...discountFactor === void 0 ? {} : { discountFactor }
   };
 }
 function formatContextWindow(tokens) {
@@ -1190,7 +1233,8 @@ var QoderAdapter = class extends LlmAdapter {
     const connection = this.config.options();
     const models = await this.catalogModels(connection, false, signal);
     const configured = models.find((entry) => entry.id === model);
-    const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow;
+    const known = DEFAULT_KNOWN_MODELS.find((entry) => entry.id === model);
+    const contextWindow = configured?.contextWindow ?? known?.contextWindow ?? connection.defaultContextWindow;
     const reasoning = configured?.reasoning === true;
     return {
       ...configured === void 0 ? { provider, id: model, name: model, inputModalities: ["text"] } : modelInfo(
@@ -1223,7 +1267,13 @@ var QoderAdapter = class extends LlmAdapter {
     const cacheKey = `${connection.endpoints.gateway}\0${hashCredential(rawPat)}`;
     const cached = modelCatalogCache.get(cacheKey);
     if (!refresh && cached !== void 0) return cached;
-    const models = await this.fetchModelCatalog(connection, rawPat, signal);
+    let models;
+    try {
+      models = await this.fetchModelCatalog(connection, rawPat, signal);
+    } catch (error) {
+      if (cached !== void 0 && !signal?.aborted) return cached;
+      throw error;
+    }
     modelCatalogCache.set(cacheKey, models);
     return models;
   }
@@ -1524,12 +1574,9 @@ var QoderAdapter = class extends LlmAdapter {
       jobTokenCache.set(key, exchanged);
       return exchanged.jobToken;
     } catch (error) {
-      if (error instanceof Error && /failed:\s*\d{3}/.test(error.message)) {
-        throw new LlmError4(
-          `Qoder CN PAT exchange failed: ${error.message}`,
-          "AUTH",
-          { cause: error }
-        );
+      if (error instanceof QoderTokenError) {
+        const credential = error.status === 401 || error.status === 403;
+        throw new LlmError4(error.message, credential ? "AUTH" : "SERVER", { cause: error });
       }
       throw error;
     }
@@ -1539,7 +1586,20 @@ var QoderAdapter = class extends LlmAdapter {
     const key = hashCredential(rawPat);
     const cached = identityCache.get(key);
     if (cached?.userID) return cached;
-    const info = await fetchUserInfo(jobToken, endpoints, signal);
+    let info;
+    try {
+      info = await fetchUserInfo(jobToken, endpoints, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (error instanceof QoderTokenError && (error.status === 401 || error.status === 403)) {
+        throw new LlmError4(error.message, "AUTH", { cause: error });
+      }
+      throw new LlmError4(
+        "Qoder CN identity lookup could not reach /userinfo",
+        "TRANSPORT",
+        { cause: error }
+      );
+    }
     if (!info.userID) {
       throw new LlmError4(
         "Qoder CN identity unavailable: /userinfo did not return a userID. Check the PAT and VPC routing (QODER_VPC_INSTANCE), then retry.",
@@ -1916,6 +1976,100 @@ function injectQuotaStyles(id = QUOTA_CSS_ID, css = QUOTA_CSS) {
   };
 }
 
+// src/client/quota.ts
+var QUOTA_AUTO_REFRESH_MS = 12e4;
+var QUOTA_REMOTE_UNMOUNTED_ERROR = "the qoder/quota remote is not mounted";
+function createQuotaController(resolve) {
+  let snapshot = { status: "idle" };
+  let inFlight;
+  let generation = 0;
+  const listeners = /* @__PURE__ */ new Set();
+  const publish = () => {
+    for (const listener of listeners) listener();
+  };
+  const load = async () => {
+    const ticket = ++generation;
+    snapshot = { ...snapshot, status: "loading" };
+    publish();
+    const namespace = resolve();
+    if (namespace === void 0) {
+      if (ticket !== generation) return;
+      snapshot = {
+        status: "error",
+        error: QUOTA_REMOTE_UNMOUNTED_ERROR,
+        ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
+      };
+      publish();
+      return;
+    }
+    try {
+      const response = await namespace.quota();
+      if (ticket !== generation) return;
+      snapshot = response.ok ? { status: "ready", report: response.value, fetchedAt: Date.now() } : {
+        status: "error",
+        error: response.error?.message ?? "the quota read failed",
+        ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
+      };
+    } catch (error) {
+      if (ticket !== generation) return;
+      snapshot = {
+        status: "error",
+        error: error instanceof Error ? error.message : String(error),
+        ...snapshot.fetchedAt === void 0 ? {} : { fetchedAt: snapshot.fetchedAt }
+      };
+    }
+    publish();
+  };
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    refresh: () => {
+      inFlight ??= load().finally(() => {
+        inFlight = void 0;
+      });
+      return inFlight;
+    }
+  };
+}
+var REAL_TIMER = {
+  set: (callback, ms) => setTimeout(callback, ms),
+  clear: (handle2) => {
+    clearTimeout(handle2);
+  }
+};
+function startQuotaAutoRefresh(controller, isVisible, timer = REAL_TIMER) {
+  references += 1;
+  visibleNow = isVisible;
+  if (activeTimer === void 0) {
+    activeTimer = timer;
+    const tick = () => {
+      if (activeTimer !== timer) return;
+      handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS);
+      if (visibleNow?.() === true) void controller.refresh();
+    };
+    handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS);
+    if (isVisible()) void controller.refresh();
+  }
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    references -= 1;
+    if (references > 0 || activeTimer === void 0) return;
+    if (handle !== void 0) activeTimer.clear(handle);
+    handle = void 0;
+    activeTimer = void 0;
+    visibleNow = void 0;
+  };
+}
+var references = 0;
+var activeTimer;
+var handle;
+var visibleNow;
+
 // src/index.ts
 var name = "llm-qoder";
 var inject = ["llm"];
@@ -1989,14 +2143,18 @@ function resolveModels(models) {
     }
     if (seen.has(model.id)) throw new Error(`llm-qoder: duplicate catalog model "${model.id}"`);
     seen.add(model.id);
+    const inputModalities = model.inputModalities === void 0 || model.inputModalities.length === 0 ? void 0 : [...model.inputModalities];
     return {
       id: model.id,
       ...model.name === void 0 ? {} : { name: model.name },
       ...model.description === void 0 ? {} : { description: model.description },
       ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
       ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
-      ...model.inputModalities === void 0 ? {} : { inputModalities: [...model.inputModalities] },
-      ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning }
+      ...inputModalities === void 0 ? {} : { inputModalities },
+      ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
+      ...model.free === void 0 ? {} : { free: model.free },
+      ...model.priceFactor === void 0 ? {} : { priceFactor: model.priceFactor },
+      ...model.promotion === void 0 ? {} : { promotion: model.promotion }
     };
   });
 }
@@ -2153,6 +2311,7 @@ export {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DONE,
   PUBLIC_GATEWAY_URL,
+  QUOTA_AUTO_REFRESH_MS,
   QUOTA_CSS,
   QUOTA_CSS_ID,
   QUOTA_ENDPOINT,
@@ -2164,6 +2323,8 @@ export {
   buildQoderAuthHeaders,
   clampPercent,
   compareModelsForSelector,
+  createQuotaController,
+  createThinkingSplitter,
   daysUntil,
   exchangeJobToken,
   fetchQoderQuota,
@@ -2201,6 +2362,8 @@ export {
   ringDashOffset,
   serializeMessages,
   serializeRequest,
+  startQuotaAutoRefresh,
   systemTextOf,
+  translate,
   usedRatio
 };

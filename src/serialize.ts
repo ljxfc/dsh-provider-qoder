@@ -255,9 +255,7 @@ export async function serializeRequest(
 export function lastUserText(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
-    if (msg !== undefined && msg.role === 'user') {
-      return getBlocksText(msg.content.filter(block => block.type !== 'tool-result'))
-    }
+    if (msg !== undefined && msg.role === 'user') return getBlocksText(msg.content)
   }
   return ''
 }

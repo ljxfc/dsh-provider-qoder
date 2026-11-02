@@ -12,7 +12,7 @@
 import { EMPTY_RESPONSE_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { DONE, type QoderEnvelope } from './sse.ts'
-import { splitThinking } from './thinking-parser.ts'
+import { createThinkingSplitter, type ThinkingPiece } from './thinking-parser.ts'
 
 /** Inner chunk shape carried inside the SSE envelope body. */
 export interface QoderInnerChunk {
@@ -122,7 +122,7 @@ function parseInnerObject(body: unknown): QoderInnerChunk {
  * @returns the harness chunk stream.
  */
 export async function* translate(
-  envelopes: AsyncIterable<QoderEnvelope | string>,
+  envelopes: AsyncIterable<QoderEnvelope | typeof DONE>,
   reasoningEnabled = true,
 ): AsyncGenerator<StreamChunk> {
   let nextIndex = 0
@@ -139,8 +139,43 @@ export async function* translate(
     return block
   }
 
+  // One splitter per stream. The tag fallback has to remember whether the text
+  // is thinking or visible ACROSS chunk boundaries: a tag the transport split in
+  // two would otherwise be emitted as literal text, or invert the rest of the
+  // stream. `emitPieces` is the single place that turns a piece into chunks, so
+  // the streamed path and the end-of-stream flush cannot disagree.
+  const thinking = reasoningEnabled ? createThinkingSplitter() : undefined
+
+  const emitPieces = (pieces: readonly ThinkingPiece[]): StreamChunk[] => {
+    const chunks: StreamChunk[] = []
+    for (const piece of pieces) {
+      if (piece.kind === 'reasoning') {
+        if (!reasoningBlock) {
+          reasoningBlock = open('reasoning')
+          chunks.push({ type: 'block-start', index: reasoningBlock.index, blockType: 'reasoning' })
+        }
+        reasoningBlock.text += piece.text
+        chunks.push({ type: 'reasoning-delta', index: reasoningBlock.index, text: piece.text })
+      } else {
+        if (!textBlock) {
+          textBlock = open('text')
+          chunks.push({ type: 'block-start', index: textBlock.index, blockType: 'text' })
+        }
+        textBlock.text += piece.text
+        chunks.push({ type: 'text-delta', index: textBlock.index, text: piece.text })
+      }
+    }
+    return chunks
+  }
+
   for await (const item of envelopes) {
     if (item === DONE) {
+      // Whatever the splitter still holds is real answer text (a half-received
+      // tag, or the tail of an unterminated block); flush it before the blocks
+      // close or the last words of the turn are silently dropped.
+      if (thinking !== undefined) {
+        for (const chunk of emitPieces(thinking.flush())) yield chunk
+      }
       for (const block of order) {
         yield { type: 'block-end', index: block.index, block: closeBlock(block) }
       }
@@ -158,12 +193,7 @@ export async function* translate(
       return
     }
 
-    let envelope: QoderEnvelope
-    if (typeof item === 'string') {
-      envelope = JSON.parse(item) as QoderEnvelope
-    } else {
-      envelope = item
-    }
+    const envelope: QoderEnvelope = item
     if (envelope.statusCodeValue !== 200) {
       throw new LlmError(
         `Qoder upstream status ${envelope.statusCodeValue}: ${String(envelope.body).slice(0, 200)}`,
@@ -199,25 +229,8 @@ export async function* translate(
 
       const content = delta?.content
       if (typeof content === 'string' && content.length > 0) {
-        if (reasoningEnabled) {
-          const pieces = splitThinking(content)
-          for (const piece of pieces) {
-            if (piece.kind === 'reasoning') {
-              if (!reasoningBlock) {
-                reasoningBlock = open('reasoning')
-                yield { type: 'block-start', index: reasoningBlock.index, blockType: 'reasoning' }
-              }
-              reasoningBlock.text += piece.text
-              yield { type: 'reasoning-delta', index: reasoningBlock.index, text: piece.text }
-            } else {
-              if (!textBlock) {
-                textBlock = open('text')
-                yield { type: 'block-start', index: textBlock.index, blockType: 'text' }
-              }
-              textBlock.text += piece.text
-              yield { type: 'text-delta', index: textBlock.index, text: piece.text }
-            }
-          }
+        if (thinking !== undefined) {
+          for (const chunk of emitPieces(thinking.push(content))) yield chunk
         } else {
           if (!textBlock) {
             textBlock = open('text')

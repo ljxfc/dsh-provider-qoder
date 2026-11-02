@@ -32,7 +32,7 @@ import {
   type QoderCnEndpoints,
 } from './cosy.ts'
 import { qoderEncodeBody } from './qoder-encoding.ts'
-import { exchangeJobToken, fetchUserInfo, refreshJobToken, type QoderJobTokenSession } from './pat.ts'
+import { exchangeJobToken, fetchUserInfo, refreshJobToken, QoderTokenError, type QoderJobTokenSession, type QoderUserInfo } from './pat.ts'
 import { fetchQoderQuota, type QoderUsageReport } from './usage.ts'
 import { serializeMessages, systemTextOf, transformTools, lastUserText } from './serialize.ts'
 import { parseQoderSse, DONE, parseEnvelope } from './sse.ts'
@@ -308,7 +308,15 @@ export class QoderAdapter extends LlmAdapter {
     const connection = this.config.options()
     const models = await this.catalogModels(connection, false, signal)
     const configured = models.find(entry => entry.id === model)
-    const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow
+    // A model the catalog describes without a window still has a true window,
+    // and the built-in table knows it for the ids this build ships. Falling
+    // straight through to `defaultContextWindow` (1M) would tell the harness the
+    // request can grow to a size the gateway rejects, so the harness never
+    // compacts and the turn dies mid-task on a 400.
+    const known = DEFAULT_KNOWN_MODELS.find(entry => entry.id === model)
+    const contextWindow = configured?.contextWindow
+      ?? known?.contextWindow
+      ?? connection.defaultContextWindow
     const reasoning = configured?.reasoning === true
     return {
       ...configured === undefined
@@ -350,7 +358,16 @@ export class QoderAdapter extends LlmAdapter {
     const cacheKey = `${connection.endpoints.gateway}\0${hashCredential(rawPat)}`
     const cached = modelCatalogCache.get(cacheKey)
     if (!refresh && cached !== undefined) return cached
-    const models = await this.fetchModelCatalog(connection, rawPat, signal)
+    let models: readonly QoderCatalogModel[]
+    try {
+      models = await this.fetchModelCatalog(connection, rawPat, signal)
+    } catch (error: unknown) {
+      // A refresh that fails (a gateway outage, a captive portal) must not empty
+      // the picker when a good catalog was read a moment ago: the cached list is
+      // still the best answer the provider has. Aborts stay aborts.
+      if (cached !== undefined && !signal?.aborted) return cached
+      throw error
+    }
     modelCatalogCache.set(cacheKey, models)
     return models
   }
@@ -690,16 +707,13 @@ export class QoderAdapter extends LlmAdapter {
       jobTokenCache.set(key, exchanged)
       return exchanged.jobToken
     } catch (error: unknown) {
-      // A rejected exchange is a credential problem (bad PAT, wrong tenant
-      // host) or a transport problem (endpoint unreachable). Only the former
-      // is AUTH; transport errors surface as-is so the outer stream() maps
-      // them to TRANSPORT and retry policy can treat them as transient.
-      if (error instanceof Error && /failed:\s*\d{3}/.test(error.message)) {
-        throw new LlmError(
-          `Qoder CN PAT exchange failed: ${error.message}`,
-          'AUTH',
-          { cause: error },
-        )
+      // A rejected exchange is either a credential problem (bad PAT, wrong
+      // tenant host) or a transport/outage problem. Only 401/403 mean the PAT
+      // itself is unusable; a 5xx from the exchange host is transient and must
+      // stay retryable, so it surfaces as SERVER rather than AUTH.
+      if (error instanceof QoderTokenError) {
+        const credential = error.status === 401 || error.status === 403
+        throw new LlmError(error.message, credential ? 'AUTH' : 'SERVER', { cause: error })
       }
       throw error
     }
@@ -715,7 +729,22 @@ export class QoderAdapter extends LlmAdapter {
     const key = hashCredential(rawPat)
     const cached = identityCache.get(key)
     if (cached?.userID) return cached
-    const info = await fetchUserInfo(jobToken, endpoints, signal)
+    let info: QoderUserInfo
+    try {
+      info = await fetchUserInfo(jobToken, endpoints, signal)
+    } catch (error: unknown) {
+      if (signal?.aborted) throw error
+      // An unreachable or failing /userinfo is an outage, not a verdict on the
+      // PAT: only a rejected token is AUTH, everything else stays retryable.
+      if (error instanceof QoderTokenError && (error.status === 401 || error.status === 403)) {
+        throw new LlmError(error.message, 'AUTH', { cause: error })
+      }
+      throw new LlmError(
+        'Qoder CN identity lookup could not reach /userinfo',
+        'TRANSPORT',
+        { cause: error },
+      )
+    }
     if (!info.userID) {
       throw new LlmError(
         'Qoder CN identity unavailable: /userinfo did not return a userID. Check the PAT and VPC routing (QODER_VPC_INSTANCE), then retry.',

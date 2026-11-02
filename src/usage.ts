@@ -219,31 +219,27 @@ function parseOpenApiUsage(payload: unknown): Partial<QoderUsageReport> {
 }
 
 async function getJson(url: string, jobToken: string, signal?: AbortSignal): Promise<unknown> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), QUOTA_TIMEOUT_MS)
-  const abort = (): void => controller.abort()
-  signal?.addEventListener('abort', abort, { once: true })
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${jobToken}`,
-        Accept: 'application/json',
-        // The desktop injects HTTP_PROXY, and the proxy can answer without the
-        // content-encoding header — an identity body is the only reliably
-        // decodable form (same reason the model catalog asks for identity).
-        'Accept-Encoding': 'identity',
-      },
-      signal: controller.signal,
-    })
-    if (!response.ok) {
-      throw new Error(`Qoder CN quota request to ${url} failed with HTTP ${response.status}`)
-    }
-    return await response.json()
-  } finally {
-    clearTimeout(timer)
-    signal?.removeEventListener('abort', abort)
+  const timeout = AbortSignal.timeout(QUOTA_TIMEOUT_MS)
+  // `any` folds the caller's cancellation and the per-request deadline into one
+  // signal, which also honours a caller that is ALREADY aborted — an
+  // `addEventListener` never fires on an aborted signal, so that read used to
+  // run to its deadline instead of failing immediately.
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${jobToken}`,
+      Accept: 'application/json',
+      // The desktop injects HTTP_PROXY, and the proxy can answer without the
+      // content-encoding header — an identity body is the only reliably
+      // decodable form (same reason the model catalog asks for identity).
+      'Accept-Encoding': 'identity',
+    },
+    signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+  })
+  if (!response.ok) {
+    throw new Error(`Qoder CN quota request to ${url} failed with HTTP ${response.status}`)
   }
+  return await response.json()
 }
 
 function emptyPool(): QoderQuotaPool {

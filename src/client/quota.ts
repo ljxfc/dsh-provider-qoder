@@ -129,8 +129,14 @@ const REAL_TIMER: QuotaTimer = {
 
 /**
  * Start the background quota poll, refcounted across the sidebar card and the
- * panel (both can be mounted at once). Only the first start fetches, and only
- * the last stop clears the timer.
+ * panel (both can be mounted at once). Only the first start fetches and only
+ * the last stop clears the timer, so the two surfaces share one poll.
+ *
+ * The visibility predicate is the one thing the two callers disagree on: the
+ * newest caller installs its own and the shared tick reads it live. Keying the
+ * timer off refcount alone (rather than a per-caller token) is what makes the
+ * last stop always able to clear it — with a token, stopping the surface that
+ * happened to start the timer first left a timer nothing could ever clear.
  *
  * @param controller - the shared controller.
  * @param isVisible - reads the live toggle; a hidden surface stops the poll.
@@ -143,30 +149,36 @@ export function startQuotaAutoRefresh(
   timer: QuotaTimer = REAL_TIMER,
 ): () => void {
   references += 1
-  const ticket = ++ticketSeq
-  const tick = (): void => {
-    if (activeTicket !== ticket) return
-    if (isVisible()) void controller.refresh()
+  visibleNow = isVisible
+  if (activeTimer === undefined) {
+    activeTimer = timer
+    const tick = (): void => {
+      if (activeTimer !== timer) return
+      handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS)
+      if (visibleNow?.() === true) void controller.refresh()
+    }
     handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS)
-  }
-  if (activeTicket === undefined) {
-    activeTicket = ticket
-    handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS)
     if (isVisible()) void controller.refresh()
   }
+  let stopped = false
   return () => {
+    // A stop function is idempotent: a double-unmount must not drive the
+    // refcount negative and hand a later caller a timer nobody owns.
+    if (stopped) return
+    stopped = true
     references -= 1
-    if (references > 0 || activeTicket !== ticket) return
-    activeTicket = undefined
-    if (handle !== undefined) timer.clear(handle)
+    if (references > 0 || activeTimer === undefined) return
+    if (handle !== undefined) activeTimer.clear(handle)
     handle = undefined
+    activeTimer = undefined
+    visibleNow = undefined
   }
 }
 
 let references = 0
-let ticketSeq = 0
-let activeTicket: number | undefined
+let activeTimer: QuotaTimer | undefined
 let handle: unknown
+let visibleNow: (() => boolean) | undefined
 
 /**
  * The contribution the client entry mounts. Re-exported here so the browser

@@ -44,7 +44,10 @@ export type { QoderAdapterOptions, QoderCatalogModel, QoderConnectionOptions } f
 export { qoderEncodeBody } from './qoder-encoding.ts'
 export { serializeMessages, serializeRequest, systemTextOf } from './serialize.ts'
 export type { QoderMessage, QoderSerializedRequest } from './serialize.ts'
-export { mapFinishReason, mapUsage } from './translate.ts'
+export { mapFinishReason, mapUsage, translate } from './translate.ts'
+export type { QoderInnerChunk } from './translate.ts'
+export { createThinkingSplitter } from './thinking-parser.ts'
+export type { ThinkingPiece, ThinkingSplitter } from './thinking-parser.ts'
 export { parseQoderSse, parseEnvelope, DONE } from './sse.ts'
 export {
   buildQoderAuthHeaders,
@@ -89,6 +92,15 @@ export {
   usedRatio,
 } from './quota-view.ts'
 export { QUOTA_CSS, QUOTA_CSS_ID, injectQuotaStyles } from './quota-styles.ts'
+// The quota controller and its refcounted poll are pure (no React, no DOM), so
+// the host build re-exports them and the tests can drive the timer seam instead
+// of only reaching this code through the bundled browser half.
+export {
+  createQuotaController,
+  QUOTA_AUTO_REFRESH_MS,
+  startQuotaAutoRefresh,
+} from './client/quota.ts'
+export type { QuotaController, QuotaSnapshot, QuotaTimer } from './client/quota.ts'
 
 export const name = 'llm-qoder'
 export const inject = ['llm']
@@ -250,14 +262,27 @@ function resolveModels(
     }
     if (seen.has(model.id)) throw new Error(`llm-qoder: duplicate catalog model "${model.id}"`)
     seen.add(model.id)
+    // Schemastery materializes an omitted array as `[]`, and an empty modality
+    // list would tell the picker the model accepts nothing at all, so an empty
+    // list is read as "unspecified" (text).
+    const inputModalities = model.inputModalities === undefined || model.inputModalities.length === 0
+      ? undefined
+      : [...model.inputModalities]
+    // Every catalog fact the live discovery path publishes must survive a
+    // pinned catalog too, otherwise a user who pins one to work around a broken
+    // discovery endpoint silently loses the FREE badge, the credit multiplier,
+    // and the off-peak promotion.
     return {
       id: model.id,
       ...model.name === undefined ? {} : { name: model.name },
       ...model.description === undefined ? {} : { description: model.description },
       ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
       ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
-      ...model.inputModalities === undefined ? {} : { inputModalities: [...model.inputModalities] },
+      ...inputModalities === undefined ? {} : { inputModalities },
       ...model.reasoning === undefined ? {} : { reasoning: model.reasoning },
+      ...model.free === undefined ? {} : { free: model.free },
+      ...model.priceFactor === undefined ? {} : { priceFactor: model.priceFactor },
+      ...model.promotion === undefined ? {} : { promotion: model.promotion },
     }
   })
 }

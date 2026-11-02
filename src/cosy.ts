@@ -76,18 +76,6 @@ export function isQoderPatValue(value?: string): boolean {
   return Boolean(value?.trim().startsWith('pt-'))
 }
 
-/**
- * Resolve a Qoder CN PAT from the environment. `QODER_API_KEY` is accepted only
- * when its value is a PAT (`pt-...`), never an opaque key.
- * @returns the trimmed PAT, or an empty string when none is available.
- */
-export function getQoderCNPat(): string {
-  const dedicated = process.env.QODERCN_PERSONAL_ACCESS_TOKEN || process.env.QODERCN_PAT || ''
-  if (dedicated.trim()) return dedicated.trim()
-  const apiKey = process.env.QODER_API_KEY || ''
-  return isQoderPatValue(apiKey) ? apiKey.trim() : ''
-}
-
 function parseQoderVPCInstance(value?: string): string | undefined {
   if (!value?.trim()) return undefined
 

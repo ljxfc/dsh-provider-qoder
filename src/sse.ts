@@ -62,17 +62,17 @@ export async function* parseQoderSse(
       const { done, value } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
-      let lineEnd = buffer.indexOf('\n')
-      while (lineEnd !== -1) {
-        const line = buffer.slice(0, lineEnd).replace(/\r$/, '').trim()
-        buffer = buffer.slice(lineEnd + 1)
-        if (line.startsWith('data:')) {
-          const payload = line.slice(5).trim()
-          sawPayload = true
-          yield payload
-          if (payload === DONE) return
-        }
-        lineEnd = buffer.indexOf('\n')
+      // Split once per read and keep the unfinished tail: slicing the buffer
+      // again for every line made a read with n lines cost O(n²) in its length.
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const raw of lines) {
+        const line = raw.replace(/\r$/, '').trim()
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        sawPayload = true
+        yield payload
+        if (payload === DONE) return
       }
     }
     // Trailing payload without a newline still counts (Qoder's final line

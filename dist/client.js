@@ -551,29 +551,33 @@ var REAL_TIMER = {
 };
 function startQuotaAutoRefresh(controller, isVisible, timer = REAL_TIMER) {
   references += 1;
-  const ticket = ++ticketSeq;
-  const tick = () => {
-    if (activeTicket !== ticket) return;
-    if (isVisible()) void controller.refresh();
-    handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS);
-  };
-  if (activeTicket === void 0) {
-    activeTicket = ticket;
+  visibleNow = isVisible;
+  if (activeTimer === void 0) {
+    activeTimer = timer;
+    const tick = () => {
+      if (activeTimer !== timer) return;
+      handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS);
+      if (visibleNow?.() === true) void controller.refresh();
+    };
     handle = timer.set(tick, QUOTA_AUTO_REFRESH_MS);
     if (isVisible()) void controller.refresh();
   }
+  let stopped = false;
   return () => {
+    if (stopped) return;
+    stopped = true;
     references -= 1;
-    if (references > 0 || activeTicket !== ticket) return;
-    activeTicket = void 0;
-    if (handle !== void 0) timer.clear(handle);
+    if (references > 0 || activeTimer === void 0) return;
+    if (handle !== void 0) activeTimer.clear(handle);
     handle = void 0;
+    activeTimer = void 0;
+    visibleNow = void 0;
   };
 }
 var references = 0;
-var ticketSeq = 0;
-var activeTicket;
+var activeTimer;
 var handle;
+var visibleNow;
 
 // src/client/panel.tsx
 var QUOTA_PANEL_ID = "qoder-quota-panel";

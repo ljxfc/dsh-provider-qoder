@@ -12,7 +12,7 @@
  * @module dsh-llm-qoder/pat
  */
 
-import type { QoderCnEndpoints } from './cosy.ts'
+import { qoderExchangeUrl, qoderJobTokenRefreshUrl, qoderUserInfoUrl, type QoderCnEndpoints } from './cosy.ts'
 
 const UA = 'dsh-llm-qoder'
 
@@ -31,6 +31,23 @@ export interface QoderUserInfo {
   userID: string
   email: string
   name: string
+}
+
+/**
+ * A token request the OpenAPI host answered with a non-2xx status. The status
+ * rides along because the caller has to tell the two kinds apart: 401/403 mean
+ * the PAT (or the tenant it belongs to) is unusable, while a 5xx is an outage
+ * that must stay retryable. Matching on the message text cannot draw that line.
+ */
+export class QoderTokenError extends Error {
+  /**
+   * @param message - human-readable failure, already naming the operation.
+   * @param status - the HTTP status the endpoint answered with.
+   */
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'QoderTokenError'
+  }
 }
 
 /** Exchange response shape (public CN OpenAPI). */
@@ -71,7 +88,7 @@ export async function exchangeJobToken(
   endpoints: QoderCnEndpoints,
   signal?: AbortSignal,
 ): Promise<QoderJobTokenSession> {
-  const res = await fetch(`${endpoints.openapi}/api/v1/jobToken/exchange`, {
+  const res = await fetch(qoderExchangeUrl(endpoints), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -89,7 +106,10 @@ export async function exchangeJobToken(
 
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`Qoder CN PAT exchange failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`)
+    throw new QoderTokenError(
+      `Qoder CN PAT exchange failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`,
+      res.status,
+    )
   }
 
   const data = (await res.json()) as ExchangeResponse
@@ -122,7 +142,7 @@ export async function refreshJobToken(
     throw new Error('Qoder CN job token refresh requires a non-empty refresh_token (jrt-...)')
   }
 
-  const res = await fetch(`${endpoints.openapi}/api/v1/jobToken/refresh`, {
+  const res = await fetch(qoderJobTokenRefreshUrl(endpoints), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -139,7 +159,10 @@ export async function refreshJobToken(
 
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`Qoder CN job token refresh failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`)
+    throw new QoderTokenError(
+      `Qoder CN job token refresh failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`,
+      res.status,
+    )
   }
 
   const data = (await res.json()) as ExchangeResponse
@@ -155,42 +178,47 @@ export async function refreshJobToken(
 }
 
 /**
- * Fetch the user profile with a job token. Empty fields mean the request
- * failed or returned nothing; callers decide whether empty identity is fatal.
+ * Fetch the user profile with a job token.
+ *
+ * A transport failure and an unusable token are told apart here: the caller has
+ * to report them differently (a retryable outage versus "check your PAT"), and
+ * swallowing the error into empty fields made every network blip read as a bad
+ * credential. An OK response that simply carries no id still returns empty
+ * fields, because that is a real answer the caller decides about.
+ *
  * @param jobToken - the short-lived job token (jt-...).
  * @param endpoints - resolved CN endpoints.
  * @param signal - optional caller cancellation.
- * @returns the identity, or empty fields on failure.
+ * @returns the identity, with empty fields for anything the server omitted.
+ * @throws QoderTokenError when the endpoint answers a non-2xx status.
  */
 export async function fetchUserInfo(
   jobToken: string,
   endpoints: QoderCnEndpoints,
   signal?: AbortSignal,
 ): Promise<QoderUserInfo> {
-  let userID = ''
-  let email = ''
-  let name = ''
-  try {
-    const res = await fetch(`${endpoints.openapi}/api/v1/userinfo`, {
-      headers: {
-        Authorization: `Bearer ${jobToken}`,
-        Accept: 'application/json',
-        'Accept-Encoding': 'identity',
-        'User-Agent': UA,
-        'Cosy-Version': '1.0.1',
-        'Cosy-ClientType': '5',
-      },
-      signal,
-    })
-    if (res.ok) {
-      const info = (await res.json()) as { id?: string; email?: string; name?: string; username?: string }
-      userID = info.id || ''
-      email = info.email || ''
-      name = info.name || info.username || ''
-    }
-  } catch (error: unknown) {
-    if (signal?.aborted) throw error
-    // Callers decide whether an unavailable identity is fatal.
+  const res = await fetch(qoderUserInfoUrl(endpoints), {
+    headers: {
+      Authorization: `Bearer ${jobToken}`,
+      Accept: 'application/json',
+      'Accept-Encoding': 'identity',
+      'User-Agent': UA,
+      'Cosy-Version': '1.0.1',
+      'Cosy-ClientType': '5',
+    },
+    signal,
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new QoderTokenError(
+      `Qoder CN identity lookup failed: ${res.status} ${res.statusText}. Response: ${text.slice(0, 200)}`,
+      res.status,
+    )
   }
-  return { userID, email, name }
+  const info = (await res.json()) as { id?: string; email?: string; name?: string; username?: string }
+  return {
+    userID: info.id || '',
+    email: info.email || '',
+    name: info.name || info.username || '',
+  }
 }

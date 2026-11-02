@@ -122,16 +122,16 @@ export function parsePromotion(raw: unknown): QoderModelPromotion | undefined {
   const windowStart = trimmed(record.window_start)
   const windowEnd = trimmed(record.window_end)
   if (badge === undefined && (windowStart === undefined || windowEnd === undefined)) return undefined
+  const timezone = trimmed(record.timezone)
+  const discountFactor = positiveNumber(record.discount_factor)
   return {
     ...typeof record.active === 'boolean' ? { active: record.active } : {},
     badge: badge ?? {},
     ...description === undefined ? {} : { description },
     ...windowStart === undefined ? {} : { windowStart },
     ...windowEnd === undefined ? {} : { windowEnd },
-    ...trimmed(record.timezone) === undefined ? {} : { timezone: trimmed(record.timezone) as string },
-    ...positiveNumber(record.discount_factor) === undefined
-      ? {}
-      : { discountFactor: positiveNumber(record.discount_factor) as number },
+    ...timezone === undefined ? {} : { timezone },
+    ...discountFactor === undefined ? {} : { discountFactor },
   }
 }
 
